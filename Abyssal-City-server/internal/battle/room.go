@@ -14,6 +14,9 @@ import (
 
 const tickInterval = 200 * time.Millisecond // 5 帧/秒
 
+// snapshotIntervalFrames 每 N 帧保存一次内存快照（10 帧 = 2 秒）
+const snapshotIntervalFrames = 10
+
 // 结算结果，对应 BattleSettlePush.result
 const (
 	resultWin  = 0 // 胜利
@@ -41,7 +44,14 @@ type Enemy struct {
 	Dist float64
 }
 
-// Room 一场战斗。创建后 connID 与 send 不再变更，其余状态由 mu 保护。
+// BattleSnapshot 一帧完整状态的序列化快照（frame、cost、baseHP、干员、敌人位置/血量），
+// 仅存内存，供后续回放/恢复/落盘使用。
+type BattleSnapshot struct {
+	Frame uint32
+	Data  []byte // proto.Marshal(BattleStatePush) 的结果
+}
+
+// Room 一场战斗。connID 与 send 在重连恢复时重新绑定（持 mu 进行），其余状态由 mu 保护。
 type Room struct {
 	ID     uint32
 	Seed   uint64
@@ -56,8 +66,10 @@ type Room struct {
 	enemies   []*Enemy
 	over      bool
 	startedAt time.Time
+	snapshots []*BattleSnapshot // 定时保存的内存快照，最新在最后
 
-	done chan struct{}
+	done   chan struct{} // 关闭以停止当前 tick 循环
+	exited chan struct{} // run() 完全退出后关闭；与 done 配对，重连时一并重建
 }
 
 // createRoom 创建房间并立即开始 tick 循环
@@ -72,6 +84,7 @@ func createRoom(connID uint64, send func(msgID uint16, body []byte)) *Room {
 		baseHP:    baseMaxHP,
 		startedAt: time.Now(),
 		done:      make(chan struct{}),
+		exited:    make(chan struct{}),
 	}
 	// 极简关卡：开打即生成一只怪
 	r.enemies = []*Enemy{{InstanceID: 1, HP: enemyMaxHP}}
@@ -98,6 +111,7 @@ func removeRoom(id uint32) {
 
 // run 服务端 tick 循环
 func (r *Room) run() {
+	defer close(r.exited) // r.exited 在循环启动前绑定，重连重建新通道不影响本次关闭
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
 	dt := tickInterval.Seconds()
@@ -190,6 +204,14 @@ func (r *Room) step(dt float64) bool {
 		result = resultWin
 	}
 	state := r.snapshotLocked()
+	// 每 N 帧保存一次内存快照
+	if r.frame%snapshotIntervalFrames == 0 {
+		if data, err := proto.Marshal(state); err == nil {
+			r.snapshots = append(r.snapshots, &BattleSnapshot{Frame: r.frame, Data: data})
+		} else {
+			logger.Println("序列化战斗快照失败:", err)
+		}
+	}
 	if result >= 0 {
 		r.over = true
 	}
@@ -202,6 +224,60 @@ func (r *Room) step(dt float64) bool {
 		return true
 	}
 	return false
+}
+
+// resume 重连恢复：停掉旧 tick 循环，从最近一次快照回填状态，重绑推送通道后重启 tick。
+// 返回 false 表示战斗已结束，不可恢复。
+func (r *Room) resume(connID uint64, send func(msgID uint16, body []byte)) bool {
+	r.mu.Lock()
+	if r.over {
+		r.mu.Unlock()
+		return false
+	}
+	close(r.done) // 通知旧循环退出
+	r.mu.Unlock()
+
+	<-r.exited // 等旧循环完全退出，避免恢复状态与 step 并发
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.over { // 等待期间战斗结束，pushSettle 已移除房间
+		return false
+	}
+
+	// 从最近一次快照恢复 mu 保护的状态；无快照则保持当前状态继续
+	if n := len(r.snapshots); n > 0 {
+		var state api.BattleStatePush
+		if err := proto.Unmarshal(r.snapshots[n-1].Data, &state); err != nil {
+			logger.Printf("房间%d 快照反序列化失败，从当前状态继续: %v", r.ID, err)
+		} else {
+			r.frame = state.Frame
+			r.cost = state.Cost
+			r.baseHP = state.BaseHp
+			r.operators = make([]*Operator, 0, len(state.Operators))
+			for _, op := range state.Operators {
+				r.operators = append(r.operators, &Operator{
+					ID: op.OperatorId, X: op.GridX, Y: op.GridY, Direction: op.Direction,
+				})
+			}
+			r.enemies = make([]*Enemy, 0, len(state.Enemies))
+			for _, e := range state.Enemies {
+				r.enemies = append(r.enemies, &Enemy{
+					InstanceID: e.InstanceId,
+					HP:         e.Hp,
+					Dist:       distanceAtPoint(Vec2{X: float64(e.PosX), Y: float64(e.PosY)}),
+				})
+			}
+		}
+	}
+
+	r.connID = connID
+	r.send = send
+	r.done = make(chan struct{})
+	r.exited = make(chan struct{})
+	go r.run()
+	logger.Printf("房间%d 重连恢复：connID=%d，从帧%d继续", r.ID, connID, r.frame)
+	return true
 }
 
 // snapshotLocked 生成当前帧状态快照，调用方需持有 r.mu

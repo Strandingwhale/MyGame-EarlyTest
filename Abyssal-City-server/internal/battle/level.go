@@ -57,3 +57,27 @@ func pointAtDistance(d float64) Vec2 {
 	}
 	return enemyPath[len(enemyPath)-1]
 }
+
+// distanceAtPoint 求路径上距 p 最近点对应的已行进距离（pointAtDistance 的逆，用于从快照坐标恢复 Dist）
+func distanceAtPoint(p Vec2) float64 {
+	best := 0.0
+	bestD := math.Inf(1)
+	acc := 0.0
+	for i := 1; i < len(enemyPath); i++ {
+		a, b := enemyPath[i-1], enemyPath[i]
+		dx, dy := b.X-a.X, b.Y-a.Y
+		seg := math.Hypot(dx, dy)
+		t := 0.0
+		if seg > 0 {
+			t = ((p.X-a.X)*dx + (p.Y-a.Y)*dy) / (seg * seg)
+			t = math.Max(0, math.Min(1, t))
+		}
+		qx, qy := a.X+t*dx, a.Y+t*dy
+		if d := math.Hypot(p.X-qx, p.Y-qy); d < bestD {
+			bestD = d
+			best = acc + t*seg
+		}
+		acc += seg
+	}
+	return best
+}

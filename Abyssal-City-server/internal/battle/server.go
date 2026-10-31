@@ -109,7 +109,7 @@ func handleGatewayConn(conn net.Conn) {
 	}
 }
 
-// handleEnterRoom 创建房间；room_id 非 0 时仅允许原客户端重新获取
+// handleEnterRoom 创建房间；room_id 非 0 时按重连处理，从快照恢复继续战斗
 func handleEnterRoom(payload []byte, connID uint64, cw *connWriter) *api.EnterRoomResp {
 	var req api.EnterRoomReq
 	if err := proto.Unmarshal(payload, &req); err != nil {
@@ -117,13 +117,18 @@ func handleEnterRoom(payload []byte, connID uint64, cw *connWriter) *api.EnterRo
 		return &api.EnterRoomResp{Code: codeBadParam, Msg: "请求格式错误"}
 	}
 
+	// 重连恢复：从最近快照回填状态并重启 tick，战斗从断线时的帧继续（重连即接管，归属校验待接入 uid）
 	if req.RoomId != 0 {
 		room := getRoom(req.RoomId)
 		if room == nil {
 			return &api.EnterRoomResp{Code: codeNotFound, Msg: "房间不存在或已结束"}
 		}
-		if room.connID != connID {
-			return &api.EnterRoomResp{Code: codeBadParam, Msg: "房间已被占用"}
+		if !room.resume(connID, func(msgID uint16, body []byte) {
+			if err := cw.write(msgID, connID, body); err != nil {
+				logger.Println("推送写入失败:", err)
+			}
+		}) {
+			return &api.EnterRoomResp{Code: codeNotFound, Msg: "房间不存在或已结束"}
 		}
 		return &api.EnterRoomResp{Code: codeOK, Msg: "ok", RoomId: room.ID, Seed: room.Seed}
 	}
