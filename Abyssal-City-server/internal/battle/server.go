@@ -90,6 +90,10 @@ func handleGatewayConn(conn net.Conn) {
 				respMsgID, resp = 2001, handleEnterRoom(p.Payload, p.ConnId, cw)
 			case 2002:
 				respMsgID, resp = 2003, handleDeployOperator(p.Payload)
+			case 2006:
+				respMsgID, resp = 2007, handleRetreatOperator(p.Payload)
+			case 2008:
+				respMsgID, resp = 2009, handleCastSkill(p.Payload)
 			default:
 				logger.Printf("未知战斗消息 msgId=%d，丢弃", p.MessageID)
 				continue
@@ -161,5 +165,51 @@ func handleDeployOperator(payload []byte) *api.DeployOperatorResp {
 		Msg:           msg,
 		OperatorId:    req.OperatorId,
 		RemainingCost: remaining,
+	}
+}
+
+// handleRetreatOperator 撤回干员
+func handleRetreatOperator(payload []byte) *api.RetreatOperatorResp {
+	var req api.RetreatOperatorReq
+	if err := proto.Unmarshal(payload, &req); err != nil {
+		logger.Println("解析 RetreatOperatorReq 失败:", err)
+		return &api.RetreatOperatorResp{Code: codeBadParam, Msg: "请求格式错误"}
+	}
+
+	room := getRoom(req.RoomId)
+	if room == nil {
+		return &api.RetreatOperatorResp{Code: codeNotFound, Msg: "房间不存在或已结束"}
+	}
+
+	code, msg, remaining := room.retreat(req.OperatorId)
+	return &api.RetreatOperatorResp{
+		Code:          code,
+		Msg:           msg,
+		OperatorId:    req.OperatorId,
+		RemainingCost: remaining,
+	}
+}
+
+// handleCastSkill 释放技能
+func handleCastSkill(payload []byte) *api.CastSkillResp {
+	var req api.CastSkillReq
+	if err := proto.Unmarshal(payload, &req); err != nil {
+		logger.Println("解析 CastSkillReq 失败:", err)
+		return &api.CastSkillResp{Code: codeBadParam, Msg: "请求格式错误"}
+	}
+
+	room := getRoom(req.RoomId)
+	if room == nil {
+		return &api.CastSkillResp{Code: codeNotFound, Msg: "房间不存在或已结束"}
+	}
+
+	code, msg, remaining, damage, hits := room.castSkill(req.OperatorId)
+	return &api.CastSkillResp{
+		Code:          code,
+		Msg:           msg,
+		OperatorId:    req.OperatorId,
+		RemainingCost: remaining,
+		Damage:        damage,
+		HitCount:      hits,
 	}
 }

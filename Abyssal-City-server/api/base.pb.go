@@ -698,6 +698,7 @@ func (x *BattleStatePush) GetEnemies() []*EnemyState {
 	return nil
 }
 
+// 干员状态
 type OperatorState struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	OperatorId    uint32                 `protobuf:"varint,1,opt,name=operator_id,json=operatorId,proto3" json:"operator_id,omitempty"`
@@ -928,6 +929,266 @@ func (x *BattleSettlePush) GetRewards() []string {
 	return nil
 }
 
+// 2006 RetreatOperatorReq → 2007 RetreatOperatorResp
+// 撤回在场干员，返还部分部署费用
+type RetreatOperatorReq struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RoomId        uint32                 `protobuf:"varint,1,opt,name=room_id,json=roomId,proto3" json:"room_id,omitempty"`
+	OperatorId    uint32                 `protobuf:"varint,2,opt,name=operator_id,json=operatorId,proto3" json:"operator_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RetreatOperatorReq) Reset() {
+	*x = RetreatOperatorReq{}
+	mi := &file_base_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RetreatOperatorReq) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RetreatOperatorReq) ProtoMessage() {}
+
+func (x *RetreatOperatorReq) ProtoReflect() protoreflect.Message {
+	mi := &file_base_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RetreatOperatorReq.ProtoReflect.Descriptor instead.
+func (*RetreatOperatorReq) Descriptor() ([]byte, []int) {
+	return file_base_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *RetreatOperatorReq) GetRoomId() uint32 {
+	if x != nil {
+		return x.RoomId
+	}
+	return 0
+}
+
+func (x *RetreatOperatorReq) GetOperatorId() uint32 {
+	if x != nil {
+		return x.OperatorId
+	}
+	return 0
+}
+
+type RetreatOperatorResp struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Code          int32                  `protobuf:"varint,1,opt,name=code,proto3" json:"code,omitempty"`
+	Msg           string                 `protobuf:"bytes,2,opt,name=msg,proto3" json:"msg,omitempty"`
+	OperatorId    uint32                 `protobuf:"varint,3,opt,name=operator_id,json=operatorId,proto3" json:"operator_id,omitempty"`
+	RemainingCost int32                  `protobuf:"varint,4,opt,name=remaining_cost,json=remainingCost,proto3" json:"remaining_cost,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RetreatOperatorResp) Reset() {
+	*x = RetreatOperatorResp{}
+	mi := &file_base_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RetreatOperatorResp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RetreatOperatorResp) ProtoMessage() {}
+
+func (x *RetreatOperatorResp) ProtoReflect() protoreflect.Message {
+	mi := &file_base_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RetreatOperatorResp.ProtoReflect.Descriptor instead.
+func (*RetreatOperatorResp) Descriptor() ([]byte, []int) {
+	return file_base_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *RetreatOperatorResp) GetCode() int32 {
+	if x != nil {
+		return x.Code
+	}
+	return 0
+}
+
+func (x *RetreatOperatorResp) GetMsg() string {
+	if x != nil {
+		return x.Msg
+	}
+	return ""
+}
+
+func (x *RetreatOperatorResp) GetOperatorId() uint32 {
+	if x != nil {
+		return x.OperatorId
+	}
+	return 0
+}
+
+func (x *RetreatOperatorResp) GetRemainingCost() int32 {
+	if x != nil {
+		return x.RemainingCost
+	}
+	return 0
+}
+
+// 2008 CastSkillReq → 2009 CastSkillResp
+// 释放干员技能，服务端校验冷却与费用并结算效果
+type CastSkillReq struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RoomId        uint32                 `protobuf:"varint,1,opt,name=room_id,json=roomId,proto3" json:"room_id,omitempty"`
+	OperatorId    uint32                 `protobuf:"varint,2,opt,name=operator_id,json=operatorId,proto3" json:"operator_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CastSkillReq) Reset() {
+	*x = CastSkillReq{}
+	mi := &file_base_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CastSkillReq) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CastSkillReq) ProtoMessage() {}
+
+func (x *CastSkillReq) ProtoReflect() protoreflect.Message {
+	mi := &file_base_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CastSkillReq.ProtoReflect.Descriptor instead.
+func (*CastSkillReq) Descriptor() ([]byte, []int) {
+	return file_base_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *CastSkillReq) GetRoomId() uint32 {
+	if x != nil {
+		return x.RoomId
+	}
+	return 0
+}
+
+func (x *CastSkillReq) GetOperatorId() uint32 {
+	if x != nil {
+		return x.OperatorId
+	}
+	return 0
+}
+
+type CastSkillResp struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Code          int32                  `protobuf:"varint,1,opt,name=code,proto3" json:"code,omitempty"`
+	Msg           string                 `protobuf:"bytes,2,opt,name=msg,proto3" json:"msg,omitempty"`
+	OperatorId    uint32                 `protobuf:"varint,3,opt,name=operator_id,json=operatorId,proto3" json:"operator_id,omitempty"`
+	RemainingCost int32                  `protobuf:"varint,4,opt,name=remaining_cost,json=remainingCost,proto3" json:"remaining_cost,omitempty"`
+	Damage        int32                  `protobuf:"varint,5,opt,name=damage,proto3" json:"damage,omitempty"`                     // 本次技能对射程内敌人造成的总伤害
+	HitCount      int32                  `protobuf:"varint,6,opt,name=hit_count,json=hitCount,proto3" json:"hit_count,omitempty"` // 命中的敌人数
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CastSkillResp) Reset() {
+	*x = CastSkillResp{}
+	mi := &file_base_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CastSkillResp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CastSkillResp) ProtoMessage() {}
+
+func (x *CastSkillResp) ProtoReflect() protoreflect.Message {
+	mi := &file_base_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CastSkillResp.ProtoReflect.Descriptor instead.
+func (*CastSkillResp) Descriptor() ([]byte, []int) {
+	return file_base_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *CastSkillResp) GetCode() int32 {
+	if x != nil {
+		return x.Code
+	}
+	return 0
+}
+
+func (x *CastSkillResp) GetMsg() string {
+	if x != nil {
+		return x.Msg
+	}
+	return ""
+}
+
+func (x *CastSkillResp) GetOperatorId() uint32 {
+	if x != nil {
+		return x.OperatorId
+	}
+	return 0
+}
+
+func (x *CastSkillResp) GetRemainingCost() int32 {
+	if x != nil {
+		return x.RemainingCost
+	}
+	return 0
+}
+
+func (x *CastSkillResp) GetDamage() int32 {
+	if x != nil {
+		return x.Damage
+	}
+	return 0
+}
+
+func (x *CastSkillResp) GetHitCount() int32 {
+	if x != nil {
+		return x.HitCount
+	}
+	return 0
+}
+
 var File_base_proto protoreflect.FileDescriptor
 
 const file_base_proto_rawDesc = "" +
@@ -1002,7 +1263,29 @@ const file_base_proto_rawDesc = "" +
 	"\x06result\x18\x02 \x01(\x05R\x06result\x12\x14\n" +
 	"\x05score\x18\x03 \x01(\x05R\x05score\x12!\n" +
 	"\fduration_sec\x18\x04 \x01(\x05R\vdurationSec\x12\x18\n" +
-	"\arewards\x18\x05 \x03(\tR\arewardsB\bZ\x06./;apib\x06proto3"
+	"\arewards\x18\x05 \x03(\tR\arewards\"N\n" +
+	"\x12RetreatOperatorReq\x12\x17\n" +
+	"\aroom_id\x18\x01 \x01(\rR\x06roomId\x12\x1f\n" +
+	"\voperator_id\x18\x02 \x01(\rR\n" +
+	"operatorId\"\x83\x01\n" +
+	"\x13RetreatOperatorResp\x12\x12\n" +
+	"\x04code\x18\x01 \x01(\x05R\x04code\x12\x10\n" +
+	"\x03msg\x18\x02 \x01(\tR\x03msg\x12\x1f\n" +
+	"\voperator_id\x18\x03 \x01(\rR\n" +
+	"operatorId\x12%\n" +
+	"\x0eremaining_cost\x18\x04 \x01(\x05R\rremainingCost\"H\n" +
+	"\fCastSkillReq\x12\x17\n" +
+	"\aroom_id\x18\x01 \x01(\rR\x06roomId\x12\x1f\n" +
+	"\voperator_id\x18\x02 \x01(\rR\n" +
+	"operatorId\"\xb2\x01\n" +
+	"\rCastSkillResp\x12\x12\n" +
+	"\x04code\x18\x01 \x01(\x05R\x04code\x12\x10\n" +
+	"\x03msg\x18\x02 \x01(\tR\x03msg\x12\x1f\n" +
+	"\voperator_id\x18\x03 \x01(\rR\n" +
+	"operatorId\x12%\n" +
+	"\x0eremaining_cost\x18\x04 \x01(\x05R\rremainingCost\x12\x16\n" +
+	"\x06damage\x18\x05 \x01(\x05R\x06damage\x12\x1b\n" +
+	"\thit_count\x18\x06 \x01(\x05R\bhitCountB\bZ\x06./;apib\x06proto3"
 
 var (
 	file_base_proto_rawDescOnce sync.Once
@@ -1016,22 +1299,26 @@ func file_base_proto_rawDescGZIP() []byte {
 	return file_base_proto_rawDescData
 }
 
-var file_base_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_base_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_base_proto_goTypes = []any{
-	(*PingReq)(nil),            // 0: api.PingReq
-	(*PingResp)(nil),           // 1: api.PingResp
-	(*RegisterReq)(nil),        // 2: api.RegisterReq
-	(*RegisterResp)(nil),       // 3: api.RegisterResp
-	(*LoginReq)(nil),           // 4: api.LoginReq
-	(*LoginResp)(nil),          // 5: api.LoginResp
-	(*EnterRoomReq)(nil),       // 6: api.EnterRoomReq
-	(*EnterRoomResp)(nil),      // 7: api.EnterRoomResp
-	(*DeployOperatorReq)(nil),  // 8: api.DeployOperatorReq
-	(*DeployOperatorResp)(nil), // 9: api.DeployOperatorResp
-	(*BattleStatePush)(nil),    // 10: api.BattleStatePush
-	(*OperatorState)(nil),      // 11: api.OperatorState
-	(*EnemyState)(nil),         // 12: api.EnemyState
-	(*BattleSettlePush)(nil),   // 13: api.BattleSettlePush
+	(*PingReq)(nil),             // 0: api.PingReq
+	(*PingResp)(nil),            // 1: api.PingResp
+	(*RegisterReq)(nil),         // 2: api.RegisterReq
+	(*RegisterResp)(nil),        // 3: api.RegisterResp
+	(*LoginReq)(nil),            // 4: api.LoginReq
+	(*LoginResp)(nil),           // 5: api.LoginResp
+	(*EnterRoomReq)(nil),        // 6: api.EnterRoomReq
+	(*EnterRoomResp)(nil),       // 7: api.EnterRoomResp
+	(*DeployOperatorReq)(nil),   // 8: api.DeployOperatorReq
+	(*DeployOperatorResp)(nil),  // 9: api.DeployOperatorResp
+	(*BattleStatePush)(nil),     // 10: api.BattleStatePush
+	(*OperatorState)(nil),       // 11: api.OperatorState
+	(*EnemyState)(nil),          // 12: api.EnemyState
+	(*BattleSettlePush)(nil),    // 13: api.BattleSettlePush
+	(*RetreatOperatorReq)(nil),  // 14: api.RetreatOperatorReq
+	(*RetreatOperatorResp)(nil), // 15: api.RetreatOperatorResp
+	(*CastSkillReq)(nil),        // 16: api.CastSkillReq
+	(*CastSkillResp)(nil),       // 17: api.CastSkillResp
 }
 var file_base_proto_depIdxs = []int32{
 	11, // 0: api.BattleStatePush.operators:type_name -> api.OperatorState
@@ -1054,7 +1341,7 @@ func file_base_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_base_proto_rawDesc), len(file_base_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   14,
+			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

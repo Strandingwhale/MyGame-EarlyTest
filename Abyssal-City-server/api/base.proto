@@ -103,3 +103,33 @@ message BattleSettlePush {
   int32 duration_sec = 4;        // 战斗时长
   repeated string rewards = 5;   // 奖励描述，如 "exp:100"、"gold:500"
 }
+
+// 2006 RetreatOperatorReq → 2007 RetreatOperatorResp
+// 撤回在场干员，返还部分部署费用
+message RetreatOperatorReq {
+  uint32 room_id = 1;
+  uint32 operator_id = 2;
+}
+
+message RetreatOperatorResp {
+  int32 code = 1;
+  string msg = 2;
+  uint32 operator_id = 3;
+  int32 remaining_cost = 4;
+}
+
+// 2008 CastSkillReq → 2009 CastSkillResp
+// 释放干员技能，服务端校验冷却与费用并结算效果
+message CastSkillReq {
+  uint32 room_id = 1;
+  uint32 operator_id = 2;
+}
+
+message CastSkillResp {
+  int32 code = 1;
+  string msg = 2;
+  uint32 operator_id = 3;
+  int32 remaining_cost = 4;
+  int32 damage = 5;     // 本次技能对射程内敌人造成的总伤害
+  int32 hit_count = 6;  // 命中的敌人数
+}

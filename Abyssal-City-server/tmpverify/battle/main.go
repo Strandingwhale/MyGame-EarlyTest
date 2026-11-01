@@ -2,6 +2,7 @@
 //
 //	-mode=basic     进房 → 部署 → 收状态推送 → 收结算
 //	-mode=reconnect 进房 → 部署 → 中途模拟断线 → 用 roomId 重连 → 状态继续 → 收结算
+//	-mode=skills    进房 → 部署 → 技能（含冷却校验）→ 撤回（返还费用）→ 再部署 → 收结算
 package main
 
 import (
@@ -26,11 +27,15 @@ const (
 	msgDeployR    uint16 = 2003
 	msgState      uint16 = 2004
 	msgSettle     uint16 = 2005
+	msgRetreat    uint16 = 2006
+	msgRetreatR   uint16 = 2007
+	msgSkill      uint16 = 2008
+	msgSkillR     uint16 = 2009
 )
 
 var (
 	gwAddr      = flag.String("gw", "127.0.0.1:8888", "网关地址")
-	mode        = flag.String("mode", "basic", "验证场景：basic | reconnect")
+	mode        = flag.String("mode", "basic", "验证场景：basic | reconnect | skills")
 	doDeploy    = flag.Bool("deploy", true, "是否部署干员")
 	cutoffFrame = flag.Uint("cutoff", 12, "reconnect 场景收到该帧后模拟断线（应大于快照间隔帧）")
 )
@@ -44,6 +49,8 @@ func main() {
 		err = runBasic()
 	case "reconnect":
 		err = runReconnect()
+	case "skills":
+		err = runSkills()
 	default:
 		fmt.Println("未知 -mode:", *mode)
 		os.Exit(1)
@@ -209,11 +216,107 @@ func runReconnect() error {
 	return fmt.Errorf("重连后等待结算超时")
 }
 
+// runSkills 进房 → 部署 → 等敌人进入射程 → 放技能 → 冷却校验 → 撤回 → 再部署 → 收结算
+func runSkills() error {
+	c, err := dial()
+	if err != nil {
+		return err
+	}
+	defer c.close()
+
+	resp, err := enter(c, 0)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("[1] 进房 code=%d roomId=%d\n", resp.Code, resp.RoomId)
+	if resp.Code != 0 {
+		return fmt.Errorf("进房失败 code=%d msg=%s", resp.Code, resp.Msg)
+	}
+
+	deadline := time.Now().Add(30 * time.Second)
+	var last *api.BattleStatePush
+	for last == nil || last.Frame < 8 {
+		state, settle, err := nextBattle(c, deadline)
+		if err != nil {
+			return err
+		}
+		if settle != nil {
+			return fmt.Errorf("操作尚未完成战斗就已结算 result=%d", settle.Result)
+		}
+		printState(state)
+		last = state
+		if len(state.Operators) == 0 {
+			if err := deployOperator(c, resp.RoomId); err != nil {
+				return err
+			}
+		}
+	}
+
+	// ---- 技能：敌人已进入射程，应扣费并造成伤害 ----
+	sk, err := castSkill(c, resp.RoomId, 1)
+	if err != nil {
+		return err
+	}
+	if sk.Code != 0 {
+		return fmt.Errorf("技能释放失败 code=%d msg=%s", sk.Code, sk.Msg)
+	}
+	if sk.Damage <= 0 || sk.HitCount <= 0 {
+		return fmt.Errorf("技能未命中：damage=%d hit=%d", sk.Damage, sk.HitCount)
+	}
+
+	// ---- 冷却：立刻再放应被拒绝 ----
+	sk2, err := castSkill(c, resp.RoomId, 1)
+	if err != nil {
+		return err
+	}
+	if sk2.Code == 0 {
+		return fmt.Errorf("冷却未生效：连续两次释放均成功")
+	}
+	fmt.Printf("[冷却] 连续释放被拒绝 code=%d msg=%s\n", sk2.Code, sk2.Msg)
+
+	// ---- 撤回：应返还部分费用 ----
+	rt, err := retreat(c, resp.RoomId, 1)
+	if err != nil {
+		return err
+	}
+	if rt.Code != 0 {
+		return fmt.Errorf("撤回失败 code=%d msg=%s", rt.Code, rt.Msg)
+	}
+	if rt.RemainingCost <= sk.RemainingCost {
+		return fmt.Errorf("撤回未返还费用：技能后 %d → 撤回后 %d", sk.RemainingCost, rt.RemainingCost)
+	}
+	fmt.Printf("[费用] 技能后 %d → 撤回后 %d（返还生效）\n", sk.RemainingCost, rt.RemainingCost)
+
+	// 撤回后场上没人，重新部署避免漏怪
+	if err := deployOperator(c, resp.RoomId); err != nil {
+		return err
+	}
+
+	// ---- 继续推进到结算 ----
+	for time.Now().Before(deadline) {
+		state, settle, err := nextBattle(c, deadline)
+		if err != nil {
+			return err
+		}
+		if settle != nil {
+			printSettle(settle)
+			if settle.Result == 0 {
+				fmt.Println("验证通过：技能扣费并命中、冷却拦截连发、撤回返还费用后仍正常通关")
+				return nil
+			}
+			return fmt.Errorf("结算结果非胜利 result=%d", settle.Result)
+		}
+		printState(state)
+	}
+	return fmt.Errorf("等待结算超时")
+}
+
 // ---- 协议收发 ----
 
 type client struct {
-	conn net.Conn
-	buf  bytes.Buffer
+	conn     net.Conn
+	buf      bytes.Buffer
+	lastPing time.Time
 }
 
 func dial() (*client, error) {
@@ -237,6 +340,7 @@ func (c *client) send(msgID uint16, body []byte) error {
 
 // next 读下一个完整包；单次读超时返回 nil, nil，由调用方继续轮询
 func (c *client) next(readTimeout time.Duration) (*common.Packet, error) {
+	c.keepAlive()
 	if p, err := common.Decode(&c.buf); err != nil || p != nil {
 		return p, err
 	}
@@ -251,6 +355,23 @@ func (c *client) next(readTimeout time.Duration) (*common.Packet, error) {
 	}
 	c.buf.Write(tmp[:n])
 	return common.Decode(&c.buf)
+}
+
+// keepAlive 定期发心跳（msgId=0），避免网关 10 秒无上行数据判定超时
+func (c *client) keepAlive() {
+	if time.Since(c.lastPing) < 5*time.Second {
+		return
+	}
+	c.lastPing = time.Now()
+	body, err := proto.Marshal(&api.PingReq{Timestamp: time.Now().UnixNano()})
+	if err != nil {
+		return
+	}
+	pkt, err := common.Encode(0, 0, body)
+	if err != nil {
+		return
+	}
+	_, _ = c.conn.Write(pkt)
 }
 
 // enter 发送进房请求（roomID=0 为新开，非 0 为断线重连），等待 2001 回包
@@ -311,6 +432,63 @@ func deployOperator(c *client, roomID uint32) error {
 		return nil
 	}
 	return fmt.Errorf("等待部署回包超时")
+}
+
+// retreat 撤回干员并等待 2007 回包
+func retreat(c *client, roomID, opID uint32) (*api.RetreatOperatorResp, error) {
+	body, err := proto.Marshal(&api.RetreatOperatorReq{RoomId: roomID, OperatorId: opID})
+	if err != nil {
+		return nil, err
+	}
+	if err := c.send(msgRetreat, body); err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		p, err := c.next(time.Second)
+		if err != nil {
+			return nil, err
+		}
+		if p == nil || p.MessageID != msgRetreatR {
+			continue
+		}
+		var resp api.RetreatOperatorResp
+		if err := proto.Unmarshal(p.Payload, &resp); err != nil {
+			return nil, err
+		}
+		fmt.Printf("[撤回] code=%d msg=%s remaining_cost=%d\n", resp.Code, resp.Msg, resp.RemainingCost)
+		return &resp, nil
+	}
+	return nil, fmt.Errorf("等待撤回回包超时")
+}
+
+// castSkill 释放技能并等待 2009 回包
+func castSkill(c *client, roomID, opID uint32) (*api.CastSkillResp, error) {
+	body, err := proto.Marshal(&api.CastSkillReq{RoomId: roomID, OperatorId: opID})
+	if err != nil {
+		return nil, err
+	}
+	if err := c.send(msgSkill, body); err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		p, err := c.next(time.Second)
+		if err != nil {
+			return nil, err
+		}
+		if p == nil || p.MessageID != msgSkillR {
+			continue
+		}
+		var resp api.CastSkillResp
+		if err := proto.Unmarshal(p.Payload, &resp); err != nil {
+			return nil, err
+		}
+		fmt.Printf("[技能] code=%d msg=%s remaining_cost=%d damage=%d hit=%d\n",
+			resp.Code, resp.Msg, resp.RemainingCost, resp.Damage, resp.HitCount)
+		return &resp, nil
+	}
+	return nil, fmt.Errorf("等待技能回包超时")
 }
 
 // nextBattle 读到 2004（状态）或 2005（结算）为止，二者互斥返回

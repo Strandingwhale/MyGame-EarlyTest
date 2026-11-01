@@ -2,6 +2,7 @@
 package battle
 
 import (
+	"encoding/json"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -34,21 +35,51 @@ type Operator struct {
 	ID        uint32
 	X, Y      uint32
 	Direction int32
+	// SkillReadyFrame 技能可再次释放的帧号（0 表示随时可放）
+	SkillReadyFrame uint32
 }
 
 // Enemy 场上敌人
 type Enemy struct {
 	InstanceID uint64
 	HP         int32
+	Speed      float64 // 移动速度（格/秒），由波次配置决定
 	// Dist 已沿路径行进的距离
 	Dist float64
 }
 
-// BattleSnapshot 一帧完整状态的序列化快照（frame、cost、baseHP、干员、敌人位置/血量），
-// 仅存内存，供后续回放/恢复/落盘使用。
+// BattleSnapshot 一帧完整状态的序列化快照，仅存内存，供重连恢复/后续落盘使用。
+// 存的是服务端内部状态（含敌人 Dist、速度与波次进度），不是对客户端的协议消息。
 type BattleSnapshot struct {
 	Frame uint32
-	Data  []byte // proto.Marshal(BattleStatePush) 的结果
+	Data  []byte // snapshotState 的 JSON
+}
+
+// snapshotState 快照内容：Room 中由 mu 保护的全部战斗状态
+type snapshotState struct {
+	Frame       uint32
+	Cost        int32
+	BaseHP      int32
+	Operators   []snapshotOperator
+	Enemies     []snapshotEnemy
+	WaveIndex   int     // 当前波次下标
+	Spawned     int     // 当前波已生成数量
+	SpawnTimer  float64 // 距下一只生成的剩余秒数
+	InstanceSeq uint64  // 敌人实例 ID 自增序号
+}
+
+type snapshotOperator struct {
+	ID              uint32
+	X, Y            uint32
+	Direction       int32
+	SkillReadyFrame uint32
+}
+
+type snapshotEnemy struct {
+	InstanceID uint64
+	HP         int32
+	Speed      float64
+	Dist       float64
 }
 
 // Room 一场战斗。connID 与 send 在重连恢复时重新绑定（持 mu 进行），其余状态由 mu 保护。
@@ -68,6 +99,12 @@ type Room struct {
 	startedAt time.Time
 	snapshots []*BattleSnapshot // 定时保存的内存快照，最新在最后
 
+	// 波次进度：当前波次下标、本波已生成数量、距下一只的倒计时、敌人实例 ID 序号
+	waveIndex   int
+	spawned     int
+	spawnTimer  float64
+	instanceSeq uint64
+
 	done   chan struct{} // 关闭以停止当前 tick 循环
 	exited chan struct{} // run() 完全退出后关闭；与 done 配对，重连时一并重建
 }
@@ -86,8 +123,7 @@ func createRoom(connID uint64, send func(msgID uint16, body []byte)) *Room {
 		done:      make(chan struct{}),
 		exited:    make(chan struct{}),
 	}
-	// 极简关卡：开打即生成一只怪
-	r.enemies = []*Enemy{{InstanceID: 1, HP: enemyMaxHP}}
+	// 敌人不在建房间时生成，由 step 按波次表逐个产出
 
 	roomMu.Lock()
 	rooms[id] = r
@@ -151,6 +187,72 @@ func (r *Room) deploy(opID, x, y uint32, dir int32) (int32, string, int32) {
 	return codeOK, "ok", r.cost
 }
 
+// retreat
+func (r *Room) retreat(opID uint32) (int32, string, int32) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.over {
+		return codeBadParam, "战斗已结束", r.cost
+	}
+	for i, op := range r.operators {
+		if op.ID != opID {
+			continue
+		}
+		r.operators = append(r.operators[:i], r.operators[i+1:]...)
+		r.cost += retreatRefund
+		logger.Printf("房间%d 撤回干员%d，返还费用%d，剩余费用%d", r.ID, opID, retreatRefund, r.cost)
+		return codeOK, "ok", r.cost
+	}
+	return codeBadParam, "干员不在场上", r.cost
+}
+
+// castSkill 释放干员技能：校验在场、冷却与费用，对射程内敌人造成一次性伤害。
+// 返回错误码、提示、剩余费用、总伤害与命中数。
+func (r *Room) castSkill(opID uint32) (int32, string, int32, int32, int32) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.over {
+		return codeBadParam, "战斗已结束", r.cost, 0, 0
+	}
+
+	var op *Operator
+	for _, o := range r.operators {
+		if o.ID == opID {
+			op = o
+			break
+		}
+	}
+	if op == nil {
+		return codeBadParam, "干员不在场上", r.cost, 0, 0
+	}
+	if r.frame < op.SkillReadyFrame {
+		return codeBadParam, "技能冷却中", r.cost, 0, 0
+	}
+	if r.cost < skillCost {
+		return codeBadParam, "费用不足", r.cost, 0, 0
+	}
+
+	r.cost -= skillCost
+	op.SkillReadyFrame = r.frame + skillCooldownFrames
+
+	var damage, hits int32
+	for _, e := range r.enemies {
+		if e.HP <= 0 {
+			continue
+		}
+		p := pointAtDistance(e.Dist)
+		if math.Hypot(p.X-float64(op.X), p.Y-float64(op.Y)) <= attackRange {
+			e.HP -= skillDamage
+			damage += skillDamage
+			hits++
+		}
+	}
+	logger.Printf("房间%d 干员%d 释放技能：命中%d 伤害%d，剩余费用%d", r.ID, opID, hits, damage, r.cost)
+	return codeOK, "ok", r.cost, damage, hits
+}
+
 // step 推进一帧；返回 true 表示战斗已结束
 func (r *Room) step(dt float64) bool {
 	r.mu.Lock()
@@ -160,27 +262,30 @@ func (r *Room) step(dt float64) bool {
 	}
 	r.frame++
 
+	// 1. 按波次表生成敌人（每帧最多一只）
+	r.spawnLocked(dt)
+
 	total := pathLength()
 
-	// 1. 敌人沿路径前进
+	// 2. 敌人沿路径前进，速度由各自波次配置决定
 	for _, e := range r.enemies {
-		e.Dist += enemySpeed * dt
+		e.Dist += e.Speed * dt
 	}
 
-	// 2. 射程内的干员对敌人造成伤害（每帧一次）
+	// 3. 射程内的干员对敌人造成伤害（每帧一次）
 	for _, op := range r.operators {
 		for _, e := range r.enemies {
 			if e.HP <= 0 {
 				continue
 			}
-			p := pointAtDistance(e.Dist) //pointAtDistance 按已行进距离求路径上的坐标；超出总长时返回终点
+			p := pointAtDistance(e.Dist) // 按已行进距离求路径上的坐标
 			if math.Hypot(p.X-float64(op.X), p.Y-float64(op.Y)) <= attackRange {
 				e.HP -= attackDamage
 			}
 		}
 	}
 
-	// 3. 移除阵亡敌人；走到终点的敌人扣基地生命
+	// 4. 移除阵亡敌人；走到终点的敌人扣基地生命
 	alive := make([]*Enemy, 0, len(r.enemies))
 	for _, e := range r.enemies {
 		if e.HP <= 0 {
@@ -195,18 +300,18 @@ func (r *Room) step(dt float64) bool {
 	}
 	r.enemies = alive
 
-	// 4. 胜负判定
+	// 5. 胜负判定：基地被击穿为失败；所有波次出完且场上清空为胜利
 	result := int32(-1)
 	switch {
 	case r.baseHP <= 0:
 		result = resultLose
-	case len(r.enemies) == 0:
+	case r.waveIndex >= len(waves) && len(r.enemies) == 0:
 		result = resultWin
 	}
 	state := r.snapshotLocked()
-	// 每 N 帧保存一次内存快照
+	// 每 N 帧保存一次内存快照（存内部状态，含敌人 Dist 与波次进度）
 	if r.frame%snapshotIntervalFrames == 0 {
-		if data, err := proto.Marshal(state); err == nil {
+		if data, err := json.Marshal(r.snapshotDataLocked()); err == nil {
 			r.snapshots = append(r.snapshots, &BattleSnapshot{Frame: r.frame, Data: data})
 		} else {
 			logger.Println("序列化战斗快照失败:", err)
@@ -247,25 +352,34 @@ func (r *Room) resume(connID uint64, send func(msgID uint16, body []byte)) bool 
 
 	// 从最近一次快照恢复 mu 保护的状态；无快照则保持当前状态继续
 	if n := len(r.snapshots); n > 0 {
-		var state api.BattleStatePush
-		if err := proto.Unmarshal(r.snapshots[n-1].Data, &state); err != nil {
+		var snap snapshotState
+		if err := json.Unmarshal(r.snapshots[n-1].Data, &snap); err != nil {
 			logger.Printf("房间%d 快照反序列化失败，从当前状态继续: %v", r.ID, err)
 		} else {
-			r.frame = state.Frame
-			r.cost = state.Cost
-			r.baseHP = state.BaseHp
-			r.operators = make([]*Operator, 0, len(state.Operators))
-			for _, op := range state.Operators {
+			r.frame = snap.Frame
+			r.cost = snap.Cost
+			r.baseHP = snap.BaseHP
+			r.waveIndex = snap.WaveIndex
+			r.spawned = snap.Spawned
+			r.spawnTimer = snap.SpawnTimer
+			r.instanceSeq = snap.InstanceSeq
+			r.operators = make([]*Operator, 0, len(snap.Operators))
+			for _, op := range snap.Operators {
 				r.operators = append(r.operators, &Operator{
-					ID: op.OperatorId, X: op.GridX, Y: op.GridY, Direction: op.Direction,
+					ID:              op.ID,
+					X:               op.X,
+					Y:               op.Y,
+					Direction:       op.Direction,
+					SkillReadyFrame: op.SkillReadyFrame,
 				})
 			}
-			r.enemies = make([]*Enemy, 0, len(state.Enemies))
-			for _, e := range state.Enemies {
+			r.enemies = make([]*Enemy, 0, len(snap.Enemies))
+			for _, e := range snap.Enemies {
 				r.enemies = append(r.enemies, &Enemy{
-					InstanceID: e.InstanceId,
-					HP:         e.Hp,
-					Dist:       distanceAtPoint(Vec2{X: float64(e.PosX), Y: float64(e.PosY)}),
+					InstanceID: e.InstanceID,
+					HP:         e.HP,
+					Speed:      e.Speed,
+					Dist:       e.Dist,
 				})
 			}
 		}
@@ -278,6 +392,65 @@ func (r *Room) resume(connID uint64, send func(msgID uint16, body []byte)) bool 
 	go r.run()
 	logger.Printf("房间%d 重连恢复：connID=%d，从帧%d继续", r.ID, connID, r.frame)
 	return true
+}
+
+// spawnLocked 按波次表生成敌人，每帧最多生成一只；调用方需持有 r.mu
+func (r *Room) spawnLocked(dt float64) {
+	// 当前波已出完则推进到下一波（最后一波出完后下标越界，生成结束）
+	for r.waveIndex < len(waves) && r.spawned >= waves[r.waveIndex].Count {
+		r.waveIndex++
+		r.spawned = 0
+	}
+	if r.waveIndex >= len(waves) {
+		return
+	}
+
+	r.spawnTimer -= dt
+	if r.spawnTimer > 0 {
+		return
+	}
+
+	w := waves[r.waveIndex]
+	r.instanceSeq++
+	r.enemies = append(r.enemies, &Enemy{
+		InstanceID: r.instanceSeq,
+		HP:         w.HP,
+		Speed:      w.Speed,
+	})
+	r.spawned++
+	r.spawnTimer = w.IntervalSec
+	logger.Printf("房间%d 波次%d 生成敌人%d 血量%d 速度%.1f", r.ID, r.waveIndex+1, r.instanceSeq, w.HP, w.Speed)
+}
+
+// snapshotDataLocked 构造内部状态快照，调用方需持有 r.mu
+func (r *Room) snapshotDataLocked() *snapshotState {
+	s := &snapshotState{
+		Frame:       r.frame,
+		Cost:        r.cost,
+		BaseHP:      r.baseHP,
+		WaveIndex:   r.waveIndex,
+		Spawned:     r.spawned,
+		SpawnTimer:  r.spawnTimer,
+		InstanceSeq: r.instanceSeq,
+	}
+	for _, op := range r.operators {
+		s.Operators = append(s.Operators, snapshotOperator{
+			ID:              op.ID,
+			X:               op.X,
+			Y:               op.Y,
+			Direction:       op.Direction,
+			SkillReadyFrame: op.SkillReadyFrame,
+		})
+	}
+	for _, e := range r.enemies {
+		s.Enemies = append(s.Enemies, snapshotEnemy{
+			InstanceID: e.InstanceID,
+			HP:         e.HP,
+			Speed:      e.Speed,
+			Dist:       e.Dist,
+		})
+	}
+	return s
 }
 
 // snapshotLocked 生成当前帧状态快照，调用方需持有 r.mu
