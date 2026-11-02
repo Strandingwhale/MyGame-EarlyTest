@@ -15,6 +15,20 @@ CREATE TABLE IF NOT EXISTS player (
     name       VARCHAR(64) NOT NULL DEFAULT '' COMMENT '角色名',
     level      INT         NOT NULL DEFAULT 1 COMMENT '等级',
     stamina    INT         NOT NULL DEFAULT 120 COMMENT '体力',
+    exp        INT         NOT NULL DEFAULT 0 COMMENT '经验（战斗结算累积）',
+    gold       INT         NOT NULL DEFAULT 0 COMMENT '金币（战斗结算累积）',
     created_at TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (uid) REFERENCES account (id)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+-- 战斗记录表：每场结算落一条，uid 关联 player.uid
+CREATE TABLE IF NOT EXISTS battle_record (
+    id           BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT '记录ID',
+    uid          BIGINT UNSIGNED NOT NULL COMMENT '玩家ID',
+    result       INT         NOT NULL COMMENT '0 胜 / 1 败',
+    score        INT         NOT NULL DEFAULT 0 COMMENT '结算分数',
+    duration_sec INT         NOT NULL DEFAULT 0 COMMENT '战斗时长（秒）',
+    rewards      VARCHAR(255) NOT NULL DEFAULT '' COMMENT '奖励描述，如 exp:100,gold:500',
+    created_at   TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (uid) REFERENCES player (uid)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;

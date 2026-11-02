@@ -2,8 +2,10 @@
 package battle
 
 import (
+	"bytes"
 	"encoding/json"
 	"math"
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -11,9 +13,14 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/Strandingwhale/Abyssal-City/Abyssal-City-server/api"
+	"github.com/Strandingwhale/Abyssal-City/Abyssal-City-server/internal/common"
+	"github.com/Strandingwhale/Abyssal-City/Abyssal-City-server/internal/datasave"
 )
 
 const tickInterval = 200 * time.Millisecond // 5 帧/秒
+
+// dataSaveAddr DataSave 内部服务地址，结算落库走这里
+const dataSaveAddr = "127.0.0.1:9997"
 
 // snapshotIntervalFrames 每 N 帧保存一次内存快照（10 帧 = 2 秒）
 const snapshotIntervalFrames = 10
@@ -515,5 +522,73 @@ func (r *Room) pushSettle(result int32) {
 	}
 	r.send(2005, body)
 	logger.Printf("房间%d 战斗结束：result=%d 用时%ds 分数%d", r.ID, result, duration, score)
+	// 异步落库，避免写库阻塞 tick；uid 暂用房间号占位（登录态→战斗的 uid 链路下一轮补齐）
+	go reportSettle(uint64(r.ID), result, score, duration, rewards)
 	removeRoom(r.ID)
+}
+
+// reportSettle 作为客户端连接 DataSave，发送 3000 写战斗记录请求并读取回包
+func reportSettle(uid uint64, result int32, score, duration int32, rewards []string) {
+	body, err := json.Marshal(&datasave.SaveBattleRecordReq{
+		UID:         uid,
+		Result:      result,
+		Score:       score,
+		DurationSec: duration,
+		Rewards:     rewards,
+	})
+	if err != nil {
+		logger.Println("序列化战斗记录失败:", err)
+		return
+	}
+	pkt, err := common.Encode(datasave.MsgSaveBattleRecord, 0, body)
+	if err != nil {
+		logger.Println("编码战斗记录失败:", err)
+		return
+	}
+
+	conn, err := net.DialTimeout("tcp", dataSaveAddr, 2*time.Second)
+	if err != nil {
+		logger.Printf("连接datasave服务失败，战斗记录未落库: %v", err)
+		return
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+
+	if _, err := conn.Write(pkt); err != nil {
+		logger.Println("发送战斗记录失败:", err)
+		return
+	}
+
+	// 读回包确认落库结果
+	cache := &bytes.Buffer{}
+	readBuf := make([]byte, 4096)
+	for {
+		n, err := conn.Read(readBuf)
+		if err != nil {
+			logger.Println("等待datasave回包失败:", err)
+			return
+		}
+		cache.Write(readBuf[:n])
+
+		p, err := common.Decode(cache)
+		if err != nil {
+			logger.Println("datasave回包解码失败:", err)
+			return
+		}
+		if p == nil {
+			continue
+		}
+
+		var resp datasave.SaveBattleRecordResp
+		if err := json.Unmarshal(p.Payload, &resp); err != nil {
+			logger.Println("解析datasave回包失败:", err)
+			return
+		}
+		if resp.Code != 0 {
+			logger.Printf("战斗记录落库失败：code=%d msg=%s", resp.Code, resp.Msg)
+			return
+		}
+		logger.Printf("战斗记录落库成功：uid=%d exp+%d gold+%d", uid, resp.ExpGain, resp.GoldGain)
+		return
+	}
 }
