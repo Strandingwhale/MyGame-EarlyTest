@@ -38,6 +38,7 @@ var (
 	mode        = flag.String("mode", "basic", "验证场景：basic | reconnect | skills")
 	doDeploy    = flag.Bool("deploy", true, "是否部署干员")
 	cutoffFrame = flag.Uint("cutoff", 12, "reconnect 场景收到该帧后模拟断线（应大于快照间隔帧）")
+	uid         = flag.Uint64("uid", 1, "进房携带的玩家 uid（需在 player 表存在）")
 )
 
 func main() {
@@ -376,7 +377,7 @@ func (c *client) keepAlive() {
 
 // enter 发送进房请求（roomID=0 为新开，非 0 为断线重连），等待 2001 回包
 func enter(c *client, roomID uint32) (*api.EnterRoomResp, error) {
-	body, err := proto.Marshal(&api.EnterRoomReq{LevelId: 1, RoomId: roomID})
+	body, err := proto.Marshal(&api.EnterRoomReq{LevelId: 1, RoomId: roomID, Uid: *uid})
 	if err != nil {
 		return nil, err
 	}

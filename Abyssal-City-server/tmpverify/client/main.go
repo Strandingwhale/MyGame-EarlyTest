@@ -174,7 +174,19 @@ func e2e() error {
 	if uidInDB != uint64(login.Uid) {
 		return fmt.Errorf("uid 不一致: 回包 %d 库内 %d", login.Uid, uidInDB)
 	}
-	fmt.Printf("[5] MySQL 校验通过 hash=%s… uid=%d\n", hash[:7], uidInDB)
+	var level, stamina, exp, gold int
+	if err := db.QueryRow(
+		"SELECT level, stamina, exp, gold FROM player WHERE uid = ?", uidInDB,
+	).Scan(&level, &stamina, &exp, &gold); err != nil {
+		return fmt.Errorf("查询角色: %w", err)
+	}
+	if int32(level) != login.Level || int32(stamina) != login.Stamina ||
+		int32(exp) != login.Exp || int32(gold) != login.Gold {
+		return fmt.Errorf("登录回包角色数据不符: 回包 level=%d stamina=%d exp=%d gold=%d，库内 %d/%d/%d/%d",
+			login.Level, login.Stamina, login.Exp, login.Gold, level, stamina, exp, gold)
+	}
+	fmt.Printf("[5] MySQL 校验通过 hash=%s… uid=%d role level=%d stamina=%d exp=%d gold=%d\n",
+		hash[:7], uidInDB, level, stamina, exp, gold)
 
 	// --- 回查 Redis ---
 	rdb := redis.NewClient(&redis.Options{Addr: *redisAdr})

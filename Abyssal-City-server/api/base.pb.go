@@ -275,6 +275,10 @@ type LoginResp struct {
 	Uid           int64                  `protobuf:"varint,3,opt,name=uid,proto3" json:"uid,omitempty"`    // 玩家ID，绑定到网关 session 用
 	Token         string                 `protobuf:"bytes,4,opt,name=token,proto3" json:"token,omitempty"` // 短期 token
 	SessionId     string                 `protobuf:"bytes,5,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Level         int32                  `protobuf:"varint,6,opt,name=level,proto3" json:"level,omitempty"`     // 角色等级
+	Stamina       int32                  `protobuf:"varint,7,opt,name=stamina,proto3" json:"stamina,omitempty"` // 剩余体力
+	Exp           int32                  `protobuf:"varint,8,opt,name=exp,proto3" json:"exp,omitempty"`         // 累计经验
+	Gold          int32                  `protobuf:"varint,9,opt,name=gold,proto3" json:"gold,omitempty"`       // 累计金币
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -344,12 +348,41 @@ func (x *LoginResp) GetSessionId() string {
 	return ""
 }
 
+func (x *LoginResp) GetLevel() int32 {
+	if x != nil {
+		return x.Level
+	}
+	return 0
+}
+
+func (x *LoginResp) GetStamina() int32 {
+	if x != nil {
+		return x.Stamina
+	}
+	return 0
+}
+
+func (x *LoginResp) GetExp() int32 {
+	if x != nil {
+		return x.Exp
+	}
+	return 0
+}
+
+func (x *LoginResp) GetGold() int32 {
+	if x != nil {
+		return x.Gold
+	}
+	return 0
+}
+
 // 2000 EnterRoomReq → 2001 EnterRoomResp
 // 进入/创建房间
 type EnterRoomReq struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	RoomId        uint32                 `protobuf:"varint,1,opt,name=room_id,json=roomId,proto3" json:"room_id,omitempty"`    // 0 表示由服务端创建新房间
 	LevelId       uint32                 `protobuf:"varint,2,opt,name=level_id,json=levelId,proto3" json:"level_id,omitempty"` // 关卡/地图ID
+	Uid           uint64                 `protobuf:"varint,3,opt,name=uid,proto3" json:"uid,omitempty"`                        // 登录拿到的玩家ID，进房扣体力与结算落库用
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -394,6 +427,13 @@ func (x *EnterRoomReq) GetRoomId() uint32 {
 func (x *EnterRoomReq) GetLevelId() uint32 {
 	if x != nil {
 		return x.LevelId
+	}
+	return 0
+}
+
+func (x *EnterRoomReq) GetUid() uint64 {
+	if x != nil {
+		return x.Uid
 	}
 	return 0
 }
@@ -1207,17 +1247,22 @@ const file_base_proto_rawDesc = "" +
 	"\x03msg\x18\x02 \x01(\tR\x03msg\"@\n" +
 	"\bLoginReq\x12\x18\n" +
 	"\aaccount\x18\x01 \x01(\tR\aaccount\x12\x1a\n" +
-	"\bpassword\x18\x02 \x01(\tR\bpassword\"x\n" +
+	"\bpassword\x18\x02 \x01(\tR\bpassword\"\xce\x01\n" +
 	"\tLoginResp\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\x05R\x04code\x12\x10\n" +
 	"\x03msg\x18\x02 \x01(\tR\x03msg\x12\x10\n" +
 	"\x03uid\x18\x03 \x01(\x03R\x03uid\x12\x14\n" +
 	"\x05token\x18\x04 \x01(\tR\x05token\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x05 \x01(\tR\tsessionId\"B\n" +
+	"session_id\x18\x05 \x01(\tR\tsessionId\x12\x14\n" +
+	"\x05level\x18\x06 \x01(\x05R\x05level\x12\x18\n" +
+	"\astamina\x18\a \x01(\x05R\astamina\x12\x10\n" +
+	"\x03exp\x18\b \x01(\x05R\x03exp\x12\x12\n" +
+	"\x04gold\x18\t \x01(\x05R\x04gold\"T\n" +
 	"\fEnterRoomReq\x12\x17\n" +
 	"\aroom_id\x18\x01 \x01(\rR\x06roomId\x12\x19\n" +
-	"\blevel_id\x18\x02 \x01(\rR\alevelId\"b\n" +
+	"\blevel_id\x18\x02 \x01(\rR\alevelId\x12\x10\n" +
+	"\x03uid\x18\x03 \x01(\x04R\x03uid\"b\n" +
 	"\rEnterRoomResp\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\x05R\x04code\x12\x10\n" +
 	"\x03msg\x18\x02 \x01(\tR\x03msg\x12\x17\n" +

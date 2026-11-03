@@ -32,6 +32,10 @@ message LoginResp {
   int64 uid = 3;        // 玩家ID，绑定到网关 session 用
   string token = 4;     // 短期 token
   string session_id = 5;
+  int32 level = 6;      // 角色等级
+  int32 stamina = 7;    // 剩余体力
+  int32 exp = 8;        // 累计经验
+  int32 gold = 9;       // 累计金币
 }
 
 // ============ 战斗协议（msgId 2000+，与登录 1000-1999 错开） ============
@@ -41,6 +45,7 @@ message LoginResp {
 message EnterRoomReq {
   uint32 room_id = 1;   // 0 表示由服务端创建新房间
   uint32 level_id = 2;  // 关卡/地图ID
+  uint64 uid = 3;       // 登录拿到的玩家ID，进房扣体力与结算落库用
 }
 
 message EnterRoomResp {

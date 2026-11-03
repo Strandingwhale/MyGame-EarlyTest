@@ -4,6 +4,7 @@ package battle
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net"
 	"sync"
@@ -93,6 +94,7 @@ type snapshotEnemy struct {
 type Room struct {
 	ID     uint32
 	Seed   uint64
+	uid    uint64 // 房间归属玩家，进房扣体力与结算落库用
 	connID uint64
 	send   func(msgID uint16, body []byte) // 推送给房间所属客户端
 
@@ -117,11 +119,12 @@ type Room struct {
 }
 
 // createRoom 创建房间并立即开始 tick 循环
-func createRoom(connID uint64, send func(msgID uint16, body []byte)) *Room {
+func createRoom(uid, connID uint64, send func(msgID uint16, body []byte)) *Room {
 	id := roomSeq.Add(1)
 	r := &Room{
 		ID:        id,
 		Seed:      uint64(time.Now().UnixNano()),
+		uid:       uid,
 		connID:    connID,
 		send:      send,
 		cost:      initCost,
@@ -522,73 +525,88 @@ func (r *Room) pushSettle(result int32) {
 	}
 	r.send(2005, body)
 	logger.Printf("房间%d 战斗结束：result=%d 用时%ds 分数%d", r.ID, result, duration, score)
-	// 异步落库，避免写库阻塞 tick；uid 暂用房间号占位（登录态→战斗的 uid 链路下一轮补齐）
-	go reportSettle(uint64(r.ID), result, score, duration, rewards)
+	// 异步落库，避免写库阻塞 tick；uid 来自进房时登录态带入的玩家 ID
+	go reportSettle(r.uid, result, score, duration, rewards)
 	removeRoom(r.ID)
 }
 
-// reportSettle 作为客户端连接 DataSave，发送 3000 写战斗记录请求并读取回包
-func reportSettle(uid uint64, result int32, score, duration int32, rewards []string) {
-	body, err := json.Marshal(&datasave.SaveBattleRecordReq{
-		UID:         uid,
-		Result:      result,
-		Score:       score,
-		DurationSec: duration,
-		Rewards:     rewards,
-	})
+// callDataSave 作为客户端连接 DataSave，发送一条内部请求并解析回包到 resp
+func callDataSave(msgID uint16, req, resp any) error {
+	body, err := json.Marshal(req)
 	if err != nil {
-		logger.Println("序列化战斗记录失败:", err)
-		return
+		return fmt.Errorf("序列化datasave请求失败: %w", err)
 	}
-	pkt, err := common.Encode(datasave.MsgSaveBattleRecord, 0, body)
+	pkt, err := common.Encode(msgID, 0, body)
 	if err != nil {
-		logger.Println("编码战斗记录失败:", err)
-		return
+		return fmt.Errorf("编码datasave请求失败: %w", err)
 	}
 
 	conn, err := net.DialTimeout("tcp", dataSaveAddr, 2*time.Second)
 	if err != nil {
-		logger.Printf("连接datasave服务失败，战斗记录未落库: %v", err)
-		return
+		return fmt.Errorf("连接datasave服务失败: %w", err)
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
 
 	if _, err := conn.Write(pkt); err != nil {
-		logger.Println("发送战斗记录失败:", err)
-		return
+		return fmt.Errorf("发送datasave请求失败: %w", err)
 	}
 
-	// 读回包确认落库结果
 	cache := &bytes.Buffer{}
 	readBuf := make([]byte, 4096)
 	for {
 		n, err := conn.Read(readBuf)
 		if err != nil {
-			logger.Println("等待datasave回包失败:", err)
-			return
+			return fmt.Errorf("等待datasave回包失败: %w", err)
 		}
 		cache.Write(readBuf[:n])
 
 		p, err := common.Decode(cache)
 		if err != nil {
-			logger.Println("datasave回包解码失败:", err)
-			return
+			return fmt.Errorf("datasave回包解码失败: %w", err)
 		}
 		if p == nil {
 			continue
 		}
+		return json.Unmarshal(p.Payload, resp)
+	}
+}
 
-		var resp datasave.SaveBattleRecordResp
-		if err := json.Unmarshal(p.Payload, &resp); err != nil {
-			logger.Println("解析datasave回包失败:", err)
-			return
-		}
-		if resp.Code != 0 {
-			logger.Printf("战斗记录落库失败：code=%d msg=%s", resp.Code, resp.Msg)
-			return
-		}
-		logger.Printf("战斗记录落库成功：uid=%d exp+%d gold+%d", uid, resp.ExpGain, resp.GoldGain)
+// deductStamina 进房时扣 1 点体力；返回 DataSave 错误码与提示
+func deductStamina(uid uint64) (int32, string) {
+	var resp datasave.DeductStaminaResp
+	if err := callDataSave(datasave.MsgDeductStamina, &datasave.DeductStaminaReq{
+		UID:    uid,
+		Amount: 1,
+	}, &resp); err != nil {
+		logger.Println("扣除体力失败:", err)
+		return codeServerError, "服务器繁忙"
+	}
+	if resp.Code != 0 {
+		logger.Printf("扣除体力失败：uid=%d code=%d msg=%s remaining=%d", uid, resp.Code, resp.Msg, resp.Remaining)
+		return resp.Code, resp.Msg
+	}
+	logger.Printf("扣除体力成功：uid=%d 剩余%d", uid, resp.Remaining)
+	return codeOK, "ok"
+}
+
+// reportSettle 作为客户端连接 DataSave，发送 3000 写战斗记录请求并读取回包
+func reportSettle(uid uint64, result int32, score, duration int32, rewards []string) {
+	var resp datasave.SaveBattleRecordResp
+	err := callDataSave(datasave.MsgSaveBattleRecord, &datasave.SaveBattleRecordReq{
+		UID:         uid,
+		Result:      result,
+		Score:       score,
+		DurationSec: duration,
+		Rewards:     rewards,
+	}, &resp)
+	if err != nil {
+		logger.Printf("战斗记录落库失败：%v", err)
 		return
 	}
+	if resp.Code != 0 {
+		logger.Printf("战斗记录落库失败：code=%d msg=%s", resp.Code, resp.Msg)
+		return
+	}
+	logger.Printf("战斗记录落库成功：uid=%d exp+%d gold+%d", uid, resp.ExpGain, resp.GoldGain)
 }

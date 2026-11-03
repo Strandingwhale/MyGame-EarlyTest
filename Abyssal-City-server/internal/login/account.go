@@ -121,8 +121,28 @@ func handleLogin(payload []byte) *api.LoginResp {
 		return &api.LoginResp{Code: codeServerError, Msg: "服务器繁忙"}
 	}
 
+	// 角色信息：注册时已建 player 行；老账号缺失时按零值返回，不阻断登录
+	var role api.LoginResp
+	roleErr := db.QueryRow(
+		"SELECT level, stamina, exp, gold FROM player WHERE uid = ?", uid,
+	).Scan(&role.Level, &role.Stamina, &role.Exp, &role.Gold)
+	if roleErr != nil && !errors.Is(roleErr, sql.ErrNoRows) {
+		logger.Println("查询角色失败:", roleErr)
+		return &api.LoginResp{Code: codeServerError, Msg: "服务器繁忙"}
+	}
+
 	logger.Printf("登录成功：account=%s uid=%d", req.Account, uid)
-	return &api.LoginResp{Code: codeOK, Msg: "ok", Uid: int64(uid), Token: token, SessionId: token}
+	return &api.LoginResp{
+		Code:      codeOK,
+		Msg:       "ok",
+		Uid:       int64(uid),
+		Token:     token,
+		SessionId: token,
+		Level:     role.Level,
+		Stamina:   role.Stamina,
+		Exp:       role.Exp,
+		Gold:      role.Gold,
+	}
 }
 
 // issueToken 生成 32 位随机 token，以 token→uid 的形式存入 Redis，到期自动删除
@@ -154,7 +174,15 @@ func handleRegister(payload []byte) *api.RegisterResp {
 		return &api.RegisterResp{Code: codeServerError, Msg: "服务器繁忙"}
 	}
 
-	_, err = db.Exec("INSERT INTO account (account, password_hash) VALUES (?, ?)", req.Account, string(hash))
+	// 账号与角色行必须在同一事务里创建，避免只有账号没有角色
+	tx, err := db.Begin()
+	if err != nil {
+		logger.Println("开启事务失败:", err)
+		return &api.RegisterResp{Code: codeServerError, Msg: "服务器繁忙"}
+	}
+	defer tx.Rollback()
+
+	res, err := tx.Exec("INSERT INTO account (account, password_hash) VALUES (?, ?)", req.Account, string(hash))
 	if err != nil {
 		// 唯一索引冲突 = 账号已存在
 		var me *mysql.MySQLError
@@ -165,7 +193,22 @@ func handleRegister(payload []byte) *api.RegisterResp {
 		return &api.RegisterResp{Code: codeServerError, Msg: "服务器繁忙"}
 	}
 
-	logger.Printf("注册成功：account=%s", req.Account)
+	uid, err := res.LastInsertId()
+	if err != nil {
+		logger.Println("读取新账号 uid 失败:", err)
+		return &api.RegisterResp{Code: codeServerError, Msg: "服务器繁忙"}
+	}
+	if _, err := tx.Exec("INSERT INTO player (uid, name) VALUES (?, ?)", uid, req.Account); err != nil {
+		logger.Println("创建角色失败:", err)
+		return &api.RegisterResp{Code: codeServerError, Msg: "服务器繁忙"}
+	}
+
+	if err := tx.Commit(); err != nil {
+		logger.Println("提交事务失败:", err)
+		return &api.RegisterResp{Code: codeServerError, Msg: "服务器繁忙"}
+	}
+
+	logger.Printf("注册成功：account=%s uid=%d", req.Account, uid)
 	return &api.RegisterResp{Code: codeOK, Msg: "ok"}
 }
 

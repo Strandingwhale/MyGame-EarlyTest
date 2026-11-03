@@ -18,9 +18,10 @@ var logger = common.NewLogger("battle")
 
 // 回包错误码
 const (
-	codeOK       = 0
-	codeBadParam = 1 // 参数缺失/格式错误
-	codeNotFound = 2 // 房间不存在
+	codeOK          = 0
+	codeBadParam    = 1 // 参数缺失/格式错误
+	codeNotFound    = 2 // 房间不存在
+	codeServerError = 3 // 内部服务（DataSave）调用失败
 )
 
 // Run 启动战斗服务，监听网关连接
@@ -121,7 +122,12 @@ func handleEnterRoom(payload []byte, connID uint64, cw *connWriter) *api.EnterRo
 		return &api.EnterRoomResp{Code: codeBadParam, Msg: "请求格式错误"}
 	}
 
-	// 重连恢复：从最近快照回填状态并重启 tick，战斗从断线时的帧继续（重连即接管，归属校验待接入 uid）
+	// 进房必须带登录态 uid：扣体力与结算落库都依赖它
+	if req.Uid == 0 {
+		return &api.EnterRoomResp{Code: codeBadParam, Msg: "uid 不能为 0，请先登录"}
+	}
+
+	// 重连恢复：从最近快照回填状态并重启 tick，战斗从断线时的帧继续；沿用房间归属 uid
 	if req.RoomId != 0 {
 		room := getRoom(req.RoomId)
 		if room == nil {
@@ -137,12 +143,18 @@ func handleEnterRoom(payload []byte, connID uint64, cw *connWriter) *api.EnterRo
 		return &api.EnterRoomResp{Code: codeOK, Msg: "ok", RoomId: room.ID, Seed: room.Seed}
 	}
 
-	room := createRoom(connID, func(msgID uint16, body []byte) {
+	// 进房扣 1 点体力；体力不足或玩家不存在时禁止进房
+	if code, msg := deductStamina(req.Uid); code != codeOK {
+		logger.Printf("玩家 uid=%d 进房失败：扣体力 code=%d msg=%s", req.Uid, code, msg)
+		return &api.EnterRoomResp{Code: code, Msg: msg}
+	}
+
+	room := createRoom(req.Uid, connID, func(msgID uint16, body []byte) {
 		if err := cw.write(msgID, connID, body); err != nil {
 			logger.Println("推送写入失败:", err)
 		}
 	})
-	logger.Printf("创建房间 roomId=%d (connID=%d) levelId=%d", room.ID, connID, req.LevelId)
+	logger.Printf("创建房间 roomId=%d (uid=%d connID=%d) levelId=%d", room.ID, req.Uid, connID, req.LevelId)
 	return &api.EnterRoomResp{Code: codeOK, Msg: "ok", RoomId: room.ID, Seed: room.Seed}
 }
 
