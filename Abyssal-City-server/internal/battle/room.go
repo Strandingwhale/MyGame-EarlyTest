@@ -26,6 +26,9 @@ const dataSaveAddr = "127.0.0.1:9997"
 // snapshotIntervalFrames 每 N 帧保存一次内存快照（10 帧 = 2 秒）
 const snapshotIntervalFrames = 10
 
+// offlineTimeout 玩家断线后等待重连的时长；超时销毁房间，避免僵尸房间占用资源
+const offlineTimeout = 30 * time.Second
+
 // 结算结果，对应 BattleSettlePush.result
 const (
 	resultWin  = 0 // 胜利
@@ -107,6 +110,10 @@ type Room struct {
 	over      bool
 	startedAt time.Time
 	snapshots []*BattleSnapshot // 定时保存的内存快照，最新在最后
+
+	// 断线等待重连：disconnected 为 true 时暂停推送，房间继续 tick
+	disconnected bool
+	offlineSeq   uint64 // 断线序号，重连/再次断线时递增，用于让旧的超时计时器失效
 
 	// 波次进度：当前波次下标、本波已生成数量、距下一只的倒计时、敌人实例 ID 序号
 	waveIndex   int
@@ -397,11 +404,48 @@ func (r *Room) resume(connID uint64, send func(msgID uint16, body []byte)) bool 
 
 	r.connID = connID
 	r.send = send
+	r.disconnected = false
+	r.offlineSeq++ // 让之前的断线超时计时器失效
 	r.done = make(chan struct{})
 	r.exited = make(chan struct{})
 	go r.run()
 	logger.Printf("房间%d 重连恢复：connID=%d，从帧%d继续", r.ID, connID, r.frame)
 	return true
+}
+
+// markOffline 标记玩家断线：房间继续 tick 并暂停推送，等待重连；超时未重连则销毁
+func (r *Room) markOffline(uid uint64) bool {
+	r.mu.Lock()
+	if r.over || r.uid != uid {
+		r.mu.Unlock()
+		return false
+	}
+	r.disconnected = true
+	r.offlineSeq++
+	seq := r.offlineSeq
+	r.mu.Unlock()
+
+	logger.Printf("房间%d 玩家 uid=%d 已断线，等待重连（超时%v）", r.ID, uid, offlineTimeout)
+	go r.destroyIfStillOffline(seq)
+	return true
+}
+
+// destroyIfStillOffline 断线超时仍未重连则销毁房间；seq 防止旧计时器误删已重连的房间
+func (r *Room) destroyIfStillOffline(seq uint64) {
+	timer := time.NewTimer(offlineTimeout)
+	defer timer.Stop()
+	<-timer.C
+
+	r.mu.Lock()
+	if r.over || !r.disconnected || r.offlineSeq != seq {
+		r.mu.Unlock()
+		return
+	}
+	r.over = true
+	r.mu.Unlock()
+
+	removeRoom(r.ID)
+	logger.Printf("房间%d 断线超时未重连，房间已销毁", r.ID)
 }
 
 // spawnLocked 按波次表生成敌人，每帧最多生成一只；调用方需持有 r.mu
@@ -493,14 +537,22 @@ func (r *Room) snapshotLocked() *api.BattleStatePush {
 	return s
 }
 
-// pushState 下发帧状态（msgId 2004）
+// pushState 下发帧状态（msgId 2004）；断线等待重连期间暂停推送
 func (r *Room) pushState(state *api.BattleStatePush) {
+	r.mu.Lock()
+	if r.disconnected {
+		r.mu.Unlock()
+		return
+	}
+	send := r.send
+	r.mu.Unlock()
+
 	body, err := proto.Marshal(state)
 	if err != nil {
 		logger.Println("序列化 BattleStatePush 失败:", err)
 		return
 	}
-	r.send(2004, body)
+	send(2004, body)
 }
 
 // pushSettle 下发结算（msgId 2005），随后销毁房间
@@ -523,7 +575,15 @@ func (r *Room) pushSettle(result int32) {
 		logger.Println("序列化 BattleSettlePush 失败:", err)
 		return
 	}
-	r.send(2005, body)
+
+	r.mu.Lock()
+	disconnected := r.disconnected
+	send := r.send
+	r.mu.Unlock()
+	// 断线时客户端已不在，跳过推送；落库仍然执行
+	if !disconnected {
+		send(2005, body)
+	}
 	logger.Printf("房间%d 战斗结束：result=%d 用时%ds 分数%d", r.ID, result, duration, score)
 	// 异步落库，避免写库阻塞 tick；uid 来自进房时登录态带入的玩家 ID
 	go reportSettle(r.uid, result, score, duration, rewards)

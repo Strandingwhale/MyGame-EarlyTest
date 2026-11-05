@@ -3,6 +3,7 @@ package battle
 
 import (
 	"bytes"
+	"encoding/json"
 	"net"
 	"sync"
 
@@ -95,6 +96,10 @@ func handleGatewayConn(conn net.Conn) {
 				respMsgID, resp = 2007, handleRetreatOperator(p.Payload)
 			case 2008:
 				respMsgID, resp = 2009, handleCastSkill(p.Payload)
+			case 2010:
+				// 网关内部通知：玩家断线，房间进入等待重连状态（无需回包）
+				handlePlayerOffline(p.Payload)
+				continue
 			default:
 				logger.Printf("未知战斗消息 msgId=%d，丢弃", p.MessageID)
 				continue
@@ -111,6 +116,30 @@ func handleGatewayConn(conn net.Conn) {
 				return
 			}
 		}
+	}
+}
+
+// playerOfflineNotify 网关断线通知负载（内部 JSON，不走客户端协议）
+type playerOfflineNotify struct {
+	UID    uint64 `json:"uid"`
+	RoomID uint32 `json:"room_id"`
+}
+
+// handlePlayerOffline 标记房间玩家已断线，等待重连；超时未重连则销毁房间
+func handlePlayerOffline(payload []byte) {
+	var n playerOfflineNotify
+	if err := json.Unmarshal(payload, &n); err != nil {
+		logger.Println("解析断线通知失败:", err)
+		return
+	}
+	room := getRoom(n.RoomID)
+	if room == nil {
+		logger.Printf("断线通知：房间%d 不存在或已结束", n.RoomID)
+		return
+	}
+	if !room.markOffline(n.UID) {
+		logger.Printf("断线通知：房间%d 不属于 uid=%d，忽略", n.RoomID, n.UID)
+		return
 	}
 }
 

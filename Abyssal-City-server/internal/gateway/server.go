@@ -3,6 +3,7 @@ package gateway
 
 import (
 	"bytes"
+	"encoding/json"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -30,7 +31,7 @@ var (
 
 	// 两个后端：login（1000-1999）与 battle（2000+）
 	loginBackend  = newBackend("login", loginAddr, handleLoginResp)
-	battleBackend = newBackend("battle", battleAddr, forwardToClient)
+	battleBackend = newBackend("battle", battleAddr, handleBattleResp)
 )
 
 // Run 连接后端服务并启动网关 TCP 监听
@@ -123,19 +124,56 @@ func (b *backend) send(pkt []byte) bool {
 	return false
 }
 
-// forwardToClient 通用回包处理：按 connID 定向投递给对应客户端
-func forwardToClient(p *common.Packet) {
-	mapLock.RLock()
-	target := clientMap[p.ConnId]
-	mapLock.RUnlock()
-
-	if target == nil {
-		logger.Printf("找不到 connID=%d 的客户端，回包丢弃", p.ConnId)
-		return
+// handleBattleResp battle 回包：记录房间归属，再按 connID 转发给客户端
+func handleBattleResp(p *common.Packet) {
+	switch p.MessageID {
+	case 2001: // 进房成功回包，记录当前房间
+		var resp api.EnterRoomResp
+		if err := proto.Unmarshal(p.Payload, &resp); err == nil && resp.Code == 0 {
+			if s := getSession(p.ConnId); s != nil {
+				s.SetRoom(resp.RoomId)
+				logger.Printf("connID=%d 进入房间 roomId=%d", p.ConnId, resp.RoomId)
+			}
+		}
+	case 2005: // 战斗结算，房间已销毁
+		if s := getSession(p.ConnId); s != nil {
+			s.SetRoom(0)
+		}
 	}
 
+	// 回包原样投递给客户端
 	pkt, _ := common.Encode(p.MessageID, p.ConnId, p.Payload)
-	_ = target.WriteMsg(pkt)
+	if target := getSession(p.ConnId); target != nil {
+		_ = target.WriteMsg(pkt)
+	}
+}
+
+func getSession(connID uint64) *Session {
+	mapLock.RLock()
+	defer mapLock.RUnlock()
+	return clientMap[connID]
+}
+
+// notifyBattleOffline 客户端断开时通知 battle：该玩家的房间进入等待重连状态
+func notifyBattleOffline(uid uint64, roomID uint32) {
+	body, err := json.Marshal(struct {
+		UID    uint64 `json:"uid"`
+		RoomID uint32 `json:"room_id"`
+	}{UID: uid, RoomID: roomID})
+	if err != nil {
+		logger.Println("序列化断线通知失败:", err)
+		return
+	}
+	pkt, err := common.Encode(2010, 0, body)
+	if err != nil {
+		logger.Println("编码断线通知失败:", err)
+		return
+	}
+	if !battleBackend.send(pkt) {
+		logger.Printf("battle 未连接，uid=%d 断线通知丢弃", uid)
+		return
+	}
+	logger.Printf("玩家 uid=%d 断开，通知 battle roomId=%d 等待重连", uid, roomID)
 }
 
 // handleLoginResp 登录回包处理：先按 connID 投递，登录成功时额外把 uid 绑定到会话
@@ -170,10 +208,18 @@ func handleConn(conn net.Conn) {
 	mapLock.Unlock()
 
 	defer func() {
+		// 断开时先取出会话状态：已进房且已登录才通知 battle 进入等待重连
+		roomID := session.RoomID()
+		uid := session.UID()
+
 		mapLock.Lock()
 		delete(clientMap, session.ConnID())
 		mapLock.Unlock()
 		session.Close()
+
+		if roomID != 0 && uid != 0 {
+			notifyBattleOffline(uid, roomID)
+		}
 	}()
 
 	logger.Printf("客户端连上：%s (connID=%d)", session.remoteAddr, session.ConnID())
@@ -247,6 +293,11 @@ func handleConn(conn net.Conn) {
 				forwardToBackend(loginBackend, p, session.ConnID())
 
 			case p.MessageID >= 2000:
+				// 战斗消息限流：心跳与登录不限流，只针对 2000+ 高频指令
+				if !session.AllowBattleMsg(time.Now()) {
+					logger.Printf("connID=%d 战斗消息超频，限流丢弃 msgId=%d", session.ConnID(), p.MessageID)
+					continue
+				}
 				// 战斗消息 → battle 服务
 				logger.Printf("转发战斗消息 msgId=%d", p.MessageID)
 				forwardToBackend(battleBackend, p, session.ConnID())

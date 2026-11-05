@@ -21,6 +21,10 @@ import (
 
 // 战斗消息号
 const (
+	msgLogin      uint16 = 1001
+	msgLoginR     uint16 = 1002
+	msgRegister   uint16 = 1003
+	msgRegisterR  uint16 = 1004
 	msgEnterRoom  uint16 = 2000
 	msgEnterRoomR uint16 = 2001
 	msgDeploy     uint16 = 2002
@@ -52,6 +56,8 @@ func main() {
 		err = runReconnect()
 	case "skills":
 		err = runSkills()
+	case "offline":
+		err = runOffline()
 	default:
 		fmt.Println("未知 -mode:", *mode)
 		os.Exit(1)
@@ -70,7 +76,7 @@ func runBasic() error {
 	}
 	defer c.close()
 
-	resp, err := enter(c, 0)
+	resp, err := enter(c, 0, *uid)
 	if err != nil {
 		return err
 	}
@@ -103,6 +109,31 @@ func runBasic() error {
 	return fmt.Errorf("超时，未收到结算")
 }
 
+// runOffline 进房后立即断开且不重连，用于观察房间断线超时销毁
+func runOffline() error {
+	c, err := dial()
+	if err != nil {
+		return err
+	}
+	roomUID, err := registerAndLogin(c)
+	if err != nil {
+		c.close()
+		return err
+	}
+	resp, err := enter(c, 0, roomUID)
+	if err != nil {
+		c.close()
+		return err
+	}
+	if resp.Code != 0 {
+		c.close()
+		return fmt.Errorf("进房失败 code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	fmt.Printf("[offline] 进房 roomId=%d uid=%d，立即断开且不重连\n", resp.RoomId, roomUID)
+	c.close()
+	return nil
+}
+
 // runReconnect 进房 → 部署 → 中途断线 → 用 roomId 重连 → 验证恢复后续跑 → 收结算
 func runReconnect() error {
 	// ---- 阶段一：首次进房，部署后推进到 cutoff 帧 ----
@@ -110,7 +141,13 @@ func runReconnect() error {
 	if err != nil {
 		return err
 	}
-	resp1, err := enter(c1, 0)
+	// 先注册登录，网关会话才有 uid，断线时才会向 battle 发 2010 通知
+	roomUID, err := registerAndLogin(c1)
+	if err != nil {
+		c1.close()
+		return err
+	}
+	resp1, err := enter(c1, 0, roomUID)
 	if err != nil {
 		c1.close()
 		return err
@@ -168,7 +205,7 @@ func runReconnect() error {
 		return err
 	}
 	defer c2.close()
-	resp2, err := enter(c2, resp1.RoomId)
+	resp2, err := enter(c2, resp1.RoomId, roomUID)
 	if err != nil {
 		return err
 	}
@@ -225,7 +262,7 @@ func runSkills() error {
 	}
 	defer c.close()
 
-	resp, err := enter(c, 0)
+	resp, err := enter(c, 0, *uid)
 	if err != nil {
 		return err
 	}
@@ -375,9 +412,71 @@ func (c *client) keepAlive() {
 	_, _ = c.conn.Write(pkt)
 }
 
+// registerAndLogin 注册临时账号并登录，返回 uid；网关通知断线依赖会话已绑定 uid
+func registerAndLogin(c *client) (uint64, error) {
+	account := fmt.Sprintf("battle_%d", time.Now().UnixNano())
+	password := "Passw0rd!battle"
+
+	body, err := proto.Marshal(&api.RegisterReq{Account: account, Password: password})
+	if err != nil {
+		return 0, err
+	}
+	if err := c.send(msgRegister, body); err != nil {
+		return 0, err
+	}
+	p, err := waitMsg(c, msgRegisterR, 5*time.Second)
+	if err != nil {
+		return 0, err
+	}
+	var reg api.RegisterResp
+	if err := proto.Unmarshal(p.Payload, &reg); err != nil {
+		return 0, err
+	}
+	if reg.Code != 0 {
+		return 0, fmt.Errorf("注册失败 code=%d msg=%s", reg.Code, reg.Msg)
+	}
+
+	body, err = proto.Marshal(&api.LoginReq{Account: account, Password: password})
+	if err != nil {
+		return 0, err
+	}
+	if err := c.send(msgLogin, body); err != nil {
+		return 0, err
+	}
+	p, err = waitMsg(c, msgLoginR, 5*time.Second)
+	if err != nil {
+		return 0, err
+	}
+	var login api.LoginResp
+	if err := proto.Unmarshal(p.Payload, &login); err != nil {
+		return 0, err
+	}
+	if login.Code != 0 || login.Uid == 0 {
+		return 0, fmt.Errorf("登录失败 code=%d msg=%s", login.Code, login.Msg)
+	}
+	fmt.Printf("[登录] uid=%d\n", login.Uid)
+	return uint64(login.Uid), nil
+}
+
+// waitMsg 读取直到拿到指定 msgId 的回包
+func waitMsg(c *client, msgID uint16, timeout time.Duration) (*common.Packet, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		p, err := c.next(time.Second)
+		if err != nil {
+			return nil, err
+		}
+		if p == nil || p.MessageID != msgID {
+			continue
+		}
+		return p, nil
+	}
+	return nil, fmt.Errorf("等待 msgId=%d 回包超时", msgID)
+}
+
 // enter 发送进房请求（roomID=0 为新开，非 0 为断线重连），等待 2001 回包
-func enter(c *client, roomID uint32) (*api.EnterRoomResp, error) {
-	body, err := proto.Marshal(&api.EnterRoomReq{LevelId: 1, RoomId: roomID, Uid: *uid})
+func enter(c *client, roomID uint32, roomUID uint64) (*api.EnterRoomResp, error) {
+	body, err := proto.Marshal(&api.EnterRoomReq{LevelId: 1, RoomId: roomID, Uid: roomUID})
 	if err != nil {
 		return nil, err
 	}
