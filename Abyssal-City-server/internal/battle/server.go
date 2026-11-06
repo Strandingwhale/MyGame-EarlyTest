@@ -11,9 +11,13 @@ import (
 
 	"github.com/Strandingwhale/Abyssal-City/Abyssal-City-server/api"
 	"github.com/Strandingwhale/Abyssal-City/Abyssal-City-server/internal/common"
+	"github.com/Strandingwhale/Abyssal-City/Abyssal-City-server/internal/config"
 )
 
 const listenAddr = ":9998"
+
+// configPath 配置表文件路径（由 cmd/configtool 从 Excel 生成）
+const configPath = "config/config.pb"
 
 var logger = common.NewLogger("battle")
 
@@ -27,6 +31,14 @@ const (
 
 // Run 启动战斗服务，监听网关连接
 func Run() {
+	// 启动时加载配置表；失败则回落硬编码默认值，不阻断服务启动
+	if err := config.Load(configPath); err != nil {
+		logger.Printf("加载配置表失败，使用默认数值: %v", err)
+	} else {
+		ops, lvs := config.Counts()
+		logger.Printf("配置表加载成功：干员%d 条，关卡%d 条", ops, lvs)
+	}
+
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		logger.Fatal("战斗服务监听失败:", err)
@@ -178,7 +190,7 @@ func handleEnterRoom(payload []byte, connID uint64, cw *connWriter) *api.EnterRo
 		return &api.EnterRoomResp{Code: code, Msg: msg}
 	}
 
-	room := createRoom(req.Uid, connID, func(msgID uint16, body []byte) {
+	room := createRoom(req.Uid, connID, req.LevelId, func(msgID uint16, body []byte) {
 		if err := cw.write(msgID, connID, body); err != nil {
 			logger.Println("推送写入失败:", err)
 		}

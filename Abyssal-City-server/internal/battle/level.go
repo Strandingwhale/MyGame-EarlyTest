@@ -1,7 +1,11 @@
 // 极简关卡配置：一条直线路径 + 按波次出怪
 package battle
 
-import "math"
+import (
+	"math"
+
+	"github.com/Strandingwhale/Abyssal-City/Abyssal-City-server/internal/config"
+)
 
 // Vec2 世界坐标，1 单位 = 1 格
 type Vec2 struct {
@@ -25,13 +29,31 @@ type Wave struct {
 	IntervalSec float64 // 同波内相邻两只的出场间隔（秒）
 }
 
-// waves 波次表：按顺序生成，全部波次生成完且场上清空才算通关
+// waves 默认波次表：配置表缺失或关卡不存在时的兜底
 var waves = []Wave{
 	{Count: 3, HP: 100, Speed: 1.2, IntervalSec: 2.0},
 	{Count: 5, HP: 120, Speed: 1.4, IntervalSec: 1.5},
 }
 
-// 关卡数值（硬编码，暂不读配置表）
+// wavesForLevel 按关卡配置生成波次表；配置缺失时回落默认 waves
+func wavesForLevel(levelID uint32) []Wave {
+	lv, ok := config.GetLevel(levelID)
+	if !ok || lv.Waves <= 0 {
+		return waves
+	}
+	out := make([]Wave, 0, lv.Waves)
+	for i := int32(0); i < lv.Waves; i++ {
+		out = append(out, Wave{
+			Count:       int(lv.EnemyCount),
+			HP:          lv.EnemyHp,
+			Speed:       float64(lv.EnemySpeed),
+			IntervalSec: float64(lv.WaveInterval),
+		})
+	}
+	return out
+}
+
+// 关卡数值（硬编码默认值，配置表缺失时兜底）
 const (
 	enemyConfigID = 1   // 敌人配置ID（下发 EnemyId 用）
 	baseMaxHP     = 1   // 基地生命，漏一只怪即失败

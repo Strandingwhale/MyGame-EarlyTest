@@ -1,0 +1,31 @@
+syntax = "proto3";
+package api;
+option go_package="./;api";
+
+// ============ 配置表（由 cmd/configtool 从 Excel 生成，服务端启动时加载） ============
+
+// 干员配置，对应 operator.xlsx 一行
+message OperatorCfg {
+  uint32 id = 1;     // 主键
+  string name = 2;   // 名称
+  int32 cost = 3;    // 部署费用
+  int32 attack = 4;  // 每帧攻击伤害
+  float range = 5;   // 攻击半径（格）
+  int32 hp = 6;      // 干员血量（仅展示）
+}
+
+// 关卡配置，对应 level.xlsx 一行；波次按 waves 数量重复同一套敌人参数
+message LevelCfg {
+  uint32 id = 1;             // 主键
+  int32 waves = 2;           // 波数
+  int32 enemy_hp = 3;        // 每只敌人血量
+  float enemy_speed = 4;     // 移动速度（格/秒）
+  int32 enemy_count = 5;     // 每波敌人数
+  float wave_interval = 6;   // 同波内相邻两只的出场间隔（秒）
+}
+
+// 配置总表，configtool 序列化后写入 config/config.pb
+message ConfigSet {
+  repeated OperatorCfg operators = 1;
+  repeated LevelCfg levels = 2;
+}

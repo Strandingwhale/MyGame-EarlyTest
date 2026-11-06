@@ -15,6 +15,7 @@ import (
 
 	"github.com/Strandingwhale/Abyssal-City/Abyssal-City-server/api"
 	"github.com/Strandingwhale/Abyssal-City/Abyssal-City-server/internal/common"
+	"github.com/Strandingwhale/Abyssal-City/Abyssal-City-server/internal/config"
 	"github.com/Strandingwhale/Abyssal-City/Abyssal-City-server/internal/datasave"
 )
 
@@ -48,6 +49,12 @@ type Operator struct {
 	Direction int32
 	// SkillReadyFrame 技能可再次释放的帧号（0 表示随时可放）
 	SkillReadyFrame uint32
+
+	// 以下数值来自干员配置表，部署时写入，重连恢复时随快照回填
+	Cost   int32   // 部署费用，撤回时按它返还
+	Attack int32   // 每帧攻击伤害
+	Range  float64 // 攻击半径（格）
+	HP     int32   // 干员血量（仅展示）
 }
 
 // Enemy 场上敌人
@@ -84,6 +91,10 @@ type snapshotOperator struct {
 	X, Y            uint32
 	Direction       int32
 	SkillReadyFrame uint32
+	Cost            int32
+	Attack          int32
+	Range           float64
+	HP              int32
 }
 
 type snapshotEnemy struct {
@@ -120,13 +131,14 @@ type Room struct {
 	spawned     int
 	spawnTimer  float64
 	instanceSeq uint64
+	wavesCfg    []Wave // 本房间的波次表，来自关卡配置
 
 	done   chan struct{} // 关闭以停止当前 tick 循环
 	exited chan struct{} // run() 完全退出后关闭；与 done 配对，重连时一并重建
 }
 
-// createRoom 创建房间并立即开始 tick 循环
-func createRoom(uid, connID uint64, send func(msgID uint16, body []byte)) *Room {
+// createRoom 创建房间并立即开始 tick 循环；波次表按关卡配置生成，配置缺失时回落默认
+func createRoom(uid, connID uint64, levelID uint32, send func(msgID uint16, body []byte)) *Room {
 	id := roomSeq.Add(1)
 	r := &Room{
 		ID:        id,
@@ -136,6 +148,7 @@ func createRoom(uid, connID uint64, send func(msgID uint16, body []byte)) *Room 
 		send:      send,
 		cost:      initCost,
 		baseHP:    baseMaxHP,
+		wavesCfg:  wavesForLevel(levelID),
 		startedAt: time.Now(),
 		done:      make(chan struct{}),
 		exited:    make(chan struct{}),
@@ -194,13 +207,31 @@ func (r *Room) deploy(opID, x, y uint32, dir int32) (int32, string, int32) {
 	if len(r.operators) >= maxOperators {
 		return codeBadParam, "干员数量已达上限", r.cost
 	}
-	if r.cost < deployCost {
+
+	// 干员数值来自配置表；配置缺失时回落硬编码默认值
+	cost, attack, rng, hp := int32(deployCost), int32(attackDamage), float64(attackRange), int32(operatorMaxHP)
+	if cfg, ok := config.GetOperator(opID); ok {
+		if cfg.Cost > 0 {
+			cost = cfg.Cost
+		}
+		attack = cfg.Attack
+		if cfg.Range > 0 {
+			rng = float64(cfg.Range)
+		}
+		hp = cfg.Hp
+	}
+
+	if r.cost < cost {
 		return codeBadParam, "费用不足", r.cost
 	}
 
-	r.cost -= deployCost
-	r.operators = append(r.operators, &Operator{ID: opID, X: x, Y: y, Direction: dir})
-	logger.Printf("房间%d 部署干员%d 于(%d,%d)，剩余费用%d", r.ID, opID, x, y, r.cost)
+	r.cost -= cost
+	r.operators = append(r.operators, &Operator{
+		ID: opID, X: x, Y: y, Direction: dir,
+		Cost: cost, Attack: attack, Range: rng, HP: hp,
+	})
+	logger.Printf("房间%d 部署干员%d 于(%d,%d)，费用%d 攻击%d 射程%.1f 剩余费用%d",
+		r.ID, opID, x, y, cost, attack, rng, r.cost)
 	return codeOK, "ok", r.cost
 }
 
@@ -217,8 +248,13 @@ func (r *Room) retreat(opID uint32) (int32, string, int32) {
 			continue
 		}
 		r.operators = append(r.operators[:i], r.operators[i+1:]...)
-		r.cost += retreatRefund
-		logger.Printf("房间%d 撤回干员%d，返还费用%d，剩余费用%d", r.ID, opID, retreatRefund, r.cost)
+		// 返还按该干员实际部署费用的一半计算
+		refund := op.Cost / 2
+		if refund <= 0 {
+			refund = retreatRefund
+		}
+		r.cost += refund
+		logger.Printf("房间%d 撤回干员%d，返还费用%d，剩余费用%d", r.ID, opID, refund, r.cost)
 		return codeOK, "ok", r.cost
 	}
 	return codeBadParam, "干员不在场上", r.cost
@@ -260,7 +296,7 @@ func (r *Room) castSkill(opID uint32) (int32, string, int32, int32, int32) {
 			continue
 		}
 		p := pointAtDistance(e.Dist)
-		if math.Hypot(p.X-float64(op.X), p.Y-float64(op.Y)) <= attackRange {
+		if math.Hypot(p.X-float64(op.X), p.Y-float64(op.Y)) <= op.Range {
 			e.HP -= skillDamage
 			damage += skillDamage
 			hits++
@@ -296,8 +332,8 @@ func (r *Room) step(dt float64) bool {
 				continue
 			}
 			p := pointAtDistance(e.Dist) // 按已行进距离求路径上的坐标
-			if math.Hypot(p.X-float64(op.X), p.Y-float64(op.Y)) <= attackRange {
-				e.HP -= attackDamage
+			if math.Hypot(p.X-float64(op.X), p.Y-float64(op.Y)) <= op.Range {
+				e.HP -= op.Attack
 			}
 		}
 	}
@@ -322,7 +358,7 @@ func (r *Room) step(dt float64) bool {
 	switch {
 	case r.baseHP <= 0:
 		result = resultLose
-	case r.waveIndex >= len(waves) && len(r.enemies) == 0:
+	case r.waveIndex >= len(r.wavesCfg) && len(r.enemies) == 0:
 		result = resultWin
 	}
 	state := r.snapshotLocked()
@@ -388,6 +424,10 @@ func (r *Room) resume(connID uint64, send func(msgID uint16, body []byte)) bool 
 					Y:               op.Y,
 					Direction:       op.Direction,
 					SkillReadyFrame: op.SkillReadyFrame,
+					Cost:            op.Cost,
+					Attack:          op.Attack,
+					Range:           op.Range,
+					HP:              op.HP,
 				})
 			}
 			r.enemies = make([]*Enemy, 0, len(snap.Enemies))
@@ -451,11 +491,11 @@ func (r *Room) destroyIfStillOffline(seq uint64) {
 // spawnLocked 按波次表生成敌人，每帧最多生成一只；调用方需持有 r.mu
 func (r *Room) spawnLocked(dt float64) {
 	// 当前波已出完则推进到下一波（最后一波出完后下标越界，生成结束）
-	for r.waveIndex < len(waves) && r.spawned >= waves[r.waveIndex].Count {
+	for r.waveIndex < len(r.wavesCfg) && r.spawned >= r.wavesCfg[r.waveIndex].Count {
 		r.waveIndex++
 		r.spawned = 0
 	}
-	if r.waveIndex >= len(waves) {
+	if r.waveIndex >= len(r.wavesCfg) {
 		return
 	}
 
@@ -464,7 +504,7 @@ func (r *Room) spawnLocked(dt float64) {
 		return
 	}
 
-	w := waves[r.waveIndex]
+	w := r.wavesCfg[r.waveIndex]
 	r.instanceSeq++
 	r.enemies = append(r.enemies, &Enemy{
 		InstanceID: r.instanceSeq,
@@ -494,6 +534,10 @@ func (r *Room) snapshotDataLocked() *snapshotState {
 			Y:               op.Y,
 			Direction:       op.Direction,
 			SkillReadyFrame: op.SkillReadyFrame,
+			Cost:            op.Cost,
+			Attack:          op.Attack,
+			Range:           op.Range,
+			HP:              op.HP,
 		})
 	}
 	for _, e := range r.enemies {
@@ -520,7 +564,7 @@ func (r *Room) snapshotLocked() *api.BattleStatePush {
 			OperatorId: op.ID,
 			GridX:      op.X,
 			GridY:      op.Y,
-			Hp:         operatorMaxHP,
+			Hp:         op.HP,
 			Direction:  op.Direction,
 		})
 	}
