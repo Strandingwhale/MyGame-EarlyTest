@@ -7,7 +7,11 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"flag"
 	"net"
+	"net/http"
+	_ "net/http/pprof" // 性能分析端点，仅在 -pprof 指定地址时开启
+	"sync"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -39,11 +43,36 @@ const (
 	codeServerError = 3 // 服务器内部错误
 )
 
+// connWriter 串行化对网关连接的写入：请求并发处理后回包来自不同 goroutine，加锁避免包交错
+type connWriter struct {
+	mu   sync.Mutex
+	conn net.Conn
+}
+
+func (w *connWriter) write(pkt []byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if _, err := w.conn.Write(pkt); err != nil {
+		_ = w.conn.Close() // 写失败说明连接已坏，主动关闭让读循环退出
+		return err
+	}
+	return nil
+}
+
+// maxInflight 限制同时在处理的请求数，-max-inflight 可调。
+// bcrypt 是 CPU 密集操作：并发开满（压测实测整机 CPU 84.7%）会抢占同机
+// battle/gateway 的 CPU，导致战斗消息 p95 从 7ms 恶化到 208ms；
+// 默认 8 并发在 32 核机器上只用约 1/4 CPU，既比串行快约 8 倍，又给延迟敏感的
+// 战斗链路留出核数（削峰 + 资源隔离）。
+var maxInflight = flag.Int("max-inflight", 8, "同时处理的注册/登录请求数上限（削峰，防 bcrypt 占满 CPU）")
+
 func handleGatewayConn(conn net.Conn) {
 	defer conn.Close()
 	logger.Println("网关接入login服务")
 	readBuf := make([]byte, 4096)
 	cache := &bytes.Buffer{}
+	cw := &connWriter{conn: conn}
+	sem := make(chan struct{}, *maxInflight)
 
 	for {
 		n, err := conn.Read(readBuf)
@@ -63,27 +92,40 @@ func handleGatewayConn(conn net.Conn) {
 				break
 			}
 
-			// 按 msgId 分发到具体处理函数
-			var respMsgId uint16
-			var resp proto.Message
-			switch p.MessageID {
-			case 1001:
-				respMsgId, resp = 1002, handleLogin(p.Payload)
-			case 1003:
-				respMsgId, resp = 1004, handleRegister(p.Payload)
-			default:
-				continue
-			}
-
-			respBody, err := proto.Marshal(resp)
-			if err != nil {
-				logger.Println("序列化回包失败:", err)
-				continue
-			}
-			// 把网关发来的 connID 原样填回去，网关才能靠它定位客户端
-			respPkt, _ := common.Encode(respMsgId, p.ConnId, respBody)
-			_, _ = conn.Write(respPkt)
+			// 每个请求独立 goroutine 处理：注册/登录的瓶颈是 bcrypt（CPU 密集），
+			// 串行处理会让所有客户端在网关上唯一的后端连接里排队（压测实测认证 p95≈14s）。
+			// 客户端对每条连接严格串行（一次一个在途请求），并发处理不影响单客户端的回包顺序。
+			sem <- struct{}{}
+			go func() {
+				defer func() { <-sem }()
+				handleRequest(cw, p)
+			}()
 		}
+	}
+}
+
+// handleRequest 按 msgId 分发处理并回包
+func handleRequest(cw *connWriter, p *common.Packet) {
+	var respMsgId uint16
+	var resp proto.Message
+	switch p.MessageID {
+	case 1001:
+		respMsgId, resp = 1002, handleLogin(p.Payload)
+	case 1003:
+		respMsgId, resp = 1004, handleRegister(p.Payload)
+	default:
+		return
+	}
+
+	respBody, err := proto.Marshal(resp)
+	if err != nil {
+		logger.Println("序列化回包失败:", err)
+		return
+	}
+	// 把网关发来的 connID 原样填回去，网关才能靠它定位客户端
+	respPkt, _ := common.Encode(respMsgId, p.ConnId, respBody)
+	if err := cw.write(respPkt); err != nil {
+		logger.Println("回包写入失败:", err)
 	}
 }
 
@@ -212,7 +254,20 @@ func handleRegister(payload []byte) *api.RegisterResp {
 	return &api.RegisterResp{Code: codeOK, Msg: "ok"}
 }
 
+// pprofAddr 性能分析端点监听地址，空表示关闭（如 127.0.0.1:6062）
+var pprofAddr = flag.String("pprof", "", "pprof 监听地址，空关闭")
+
 func main() {
+	flag.Parse()
+	if *pprofAddr != "" {
+		go func() {
+			logger.Printf("pprof 监听：http://%s/debug/pprof", *pprofAddr)
+			if err := http.ListenAndServe(*pprofAddr, nil); err != nil {
+				logger.Println("pprof 服务退出:", err)
+			}
+		}()
+	}
+
 	var err error
 	db, err = datasave.InitDB("root:fox114514@tcp(127.0.0.1:3306)/abyssal_city?parseTime=true")
 	if err != nil {

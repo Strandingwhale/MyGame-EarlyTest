@@ -1,23 +1,41 @@
-# Go编译产物
-*.exe
-*.out
-*.test
-bin/
+# ───── Unity / 团结引擎 ─────
+unity/无底深城/[Ll]ibrary/
+unity/无底深城/[Tt]emp/
+unity/无底深城/[Oo]bj/
+unity/无底深城/[Ll]ogs/
+unity/无底深城/[Uu]ser[Ss]ettings/
+unity/无底深城/[Mm]emoryCaptures/
+unity/无底深城/[Rr]ecordings/
+unity/无底深城/[Bb]uild/
+unity/无底深城/[Bb]uilds/
+unity/无底深城/.plastic/
+unity/无底深城/*.csproj
+unity/无底深城/*.sln
+unity/无底深城/*.unityproj
+unity/无底深城/*.pidb
+unity/无底深城/*.userprefs
+unity/无底深城/.vs/
+unity/无底深城/.idea/
+unity/无底深城/[Aa]ssets/[Aa]ssetStoreTools*
+unity/无底深城/[Aa]ssets/Plugins/[Ee]ditor/JetBrains*
 
-# IDE
+# ───── 打包产物（整个 Build 目录不入库，104MB）─────
+Build/
+Builds/
+
+# ───── Go ─────
+Abyssal-City-server/bin/
+Abyssal-City-server/logs/
+*.exe
+*.test
+*.out
+
+# ───── IDE / 临时验证 ─────
 .idea/
 .vscode/
-*.swp
-*.swo
+_prototest/
 
-# 日志文件
+# ───── 通用 ─────
 *.log
-logs/
-
-# 本地环境配置
-*.env
-local_config.yaml
-
-# Docker临时文件
-.dockerignore
-
+.DS_Store
+Thumbs.db
