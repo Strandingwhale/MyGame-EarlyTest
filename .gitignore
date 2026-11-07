@@ -19,9 +19,9 @@ unity/无底深城/.idea/
 unity/无底深城/[Aa]ssets/[Aa]ssetStoreTools*
 unity/无底深城/[Aa]ssets/Plugins/[Ee]ditor/JetBrains*
 
-# ───── 打包产物（整个 Build 目录不入库，104MB）─────
-Build/
+# ───── 打包产物（Builds 目录不入库）─────
 Builds/
+# Build/ 入库（游戏打包产物）
 
 # ───── Go ─────
 Abyssal-City-server/bin/
@@ -29,6 +29,7 @@ Abyssal-City-server/logs/
 *.exe
 *.test
 *.out
+!Build/*.exe
 
 # ───── IDE / 临时验证 ─────
 .idea/
